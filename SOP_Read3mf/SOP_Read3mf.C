@@ -158,6 +158,7 @@ newSopOperator(OP_OperatorTable *table)
 static PRM_Name names[] = {
     PRM_Name("flip", "Flip Normals"),   // Houdini has the opposite winding order
     PRM_Name("build", "Apply Build Instructions"), // Render only the objects listed in the 3mf build instructions
+    PRM_Name("geo", "Only Geometry"),   // Only import geometry -- no color or texture
     PRM_Name("debug", "Debug"),         // Some extra info printed to std::clog
     PRM_Name("timer", "Timer"),         // Record how long it takes to read in the model
     PRM_Name("filename", "File Name"),  // 3mf file name
@@ -168,6 +169,7 @@ static PRM_Name names[] = {
 // SOP parameter defaults
 static PRM_Default  flipit(1);  // Houdini winds in opposite order of 3mf
 static PRM_Default  buildit(1); // By default, we should apply these
+static PRM_Default  geo(0);     // By default, we'll read in everything
 static PRM_Default  debugit(0); // Turn on during development or major debugging
 static PRM_Default  timeit(0);  // Record how long it takes to read in the model
 static PRM_Default  filen(0, "my-model.3mf");
@@ -181,11 +183,12 @@ PRM_Template
 SOP_Read3mf::myTemplateList[] = {
     PRM_Template(PRM_TOGGLE,	1, &names[0], &flipit, 0, 0, 0, 0, 1, "Flip Houdini normals to match 3mf normals."),
     PRM_Template(PRM_TOGGLE,    1, &names[1], &buildit, 0, 0, 0, 0, 1, "Apply 3mf build instructions and render only what is listed in them."),
-    PRM_Template(PRM_TOGGLE,    1, &names[2], &debugit, 0, 0, 0, 0, 1, "Print debug information."),
-    PRM_Template(PRM_TOGGLE,    1, &names[3], &timeit, 0, 0, 0, 0, 1, "Report the time it took to read in the model."),
-    PRM_Template(PRM_FILE_E,	1, &names[4], &filen, 0, 0, 0, 0, 1, "Name of the 3mf input file."),
-    PRM_Template(PRM_DIRECTORY_E,    1, &names[5], &assetsn, 0, 0, 0, 0, 1, "Folder in which to unpack the 3mf archive."),
-    PRM_Template(PRM_CALLBACK,  1, &names[6], 0, 0, 0, &SOP_Read3mf::read, 0, 1, "Read in the 3mf model."),
+    PRM_Template(PRM_TOGGLE,    1, &names[2], &geo, 0, 0, 0, 0, 1, "Only read in geometry -- no color or texture."),
+    PRM_Template(PRM_TOGGLE,    1, &names[3], &debugit, 0, 0, 0, 0, 1, "Print debug information."),
+    PRM_Template(PRM_TOGGLE,    1, &names[4], &timeit, 0, 0, 0, 0, 1, "Report the time it took to read in the model."),
+    PRM_Template(PRM_FILE_E,	1, &names[5], &filen, 0, 0, 0, 0, 1, "Name of the 3mf input file."),
+    PRM_Template(PRM_DIRECTORY_E,    1, &names[6], &assetsn, 0, 0, 0, 0, 1, "Folder in which to unpack the 3mf archive."),
+    PRM_Template(PRM_CALLBACK,  1, &names[7], 0, 0, 0, &SOP_Read3mf::read, 0, 1, "Read in the 3mf model."),
     PRM_Template(),
 };
 
@@ -414,6 +417,7 @@ UT_Vector3
 convertHexStringToUTVector3(const std::string& hex_string, float& alpha, bool debug) {
 std::string working_hex_string = hex_string;
 
+    LOG_DEBUG(false, "Entered with hex_string: " << hex_string << " and alpha " << alpha);
     // Handle prefixes: '#' and '0x'
     if (working_hex_string.length() > 0 && working_hex_string.front() == '#') {
         working_hex_string.erase(0, 1);
@@ -428,7 +432,7 @@ std::string working_hex_string = hex_string;
     if (working_hex_string.length() == 8) {
         std::string alphaString = working_hex_string.substr(6, 2);
         unsigned long decimal_value = std::stoul(alphaString, nullptr, 16);
-        alpha = static_cast<double>(decimal_value) / 255.0;
+        alpha = static_cast<float>(decimal_value) / 255.0;
         working_hex_string.erase(6, 2); // Remove the last two characters (alpha)
     } else {
         alpha = 1.0;
@@ -436,7 +440,7 @@ std::string working_hex_string = hex_string;
 
     // Check for the expected 6-character length
     if (working_hex_string.length() != 6) {
-        std::cerr << "Warning: Invalid hex color string length: " << working_hex_string << " Setting color to default." << std::endl;
+        std::cerr << "Warning: Invalid hex color string length: " << working_hex_string.length() << " for " << working_hex_string << " Setting color to default." << std::endl;
         return SOP_Read3mf::DEFAULT_H_COLOR;
     }
 
@@ -588,6 +592,37 @@ void printMap(const T& map, const std::string& name, bool debug) {
     }
     
     st << '}' << std::endl;
+    LOG_DEBUG(debug, st.str());
+}
+
+
+// But the object map has a pointer to the ObjectData, so we have to do this instead
+void printObjectMap(const UT_Map<int, ObjectData*>& map, const std::string& name, bool debug) {
+    if (!debug) {
+        return;
+    }
+    std::stringstream st;
+    st << "--- Contents of Map: " << name << " ---" << std::endl;
+    st << "{" << std::endl;
+
+    for (auto it = map.begin(); it != map.end(); ++it) {
+        int id = it->first;
+        ObjectData* data = it->second;
+
+        st << "  Key (ID): " << id;
+        
+        if (data) {
+            // Check length to see if the string actually has content
+            const char* colorStr = (data->defaultColor.length() > 0) ? data->defaultColor.buffer() : "EMPTY";
+            st << " | Color: " << colorStr;
+            st << " | Group: " << data->defaultColorGroup;
+        } else {
+            st << " | Value: NULLPTR";
+        }
+        st << std::endl;
+    }
+
+    st << "}" << std::endl;
     LOG_DEBUG(debug, st.str());
 }
 
@@ -951,6 +986,7 @@ SOP_Read3mf::cookMySop(OP_Context &context)
     this->debug = this->DEBUG(t);
     this->flip = this->FLIP(t);
     this->build = this->BUILD(t);
+    this->geoOnly = this->GEO(t);
     this->timer = this->TIMER(t);
     this->FILENAME(this->filename, t);
     this->ASSETS(this->assets, t);
@@ -1096,86 +1132,90 @@ SOP_Read3mf::read(void *data, int index, fpreal t, const PRM_Template *tplate)
 
     LOG_DEBUG(this_node->debug, "Entering read");
 
-    // The first time through we need to create the machinery to use the textures.
-    // We put all of this inside a untility subnet.
-    // We create the subnet with name from our node name, which will make it
-    // unique if another 3mf reader node has also been instantiated.
-    // After creating the utility subnet, we put down a matnet in it.
-    // The we put down a shader inside the matnet and set the path and other parameters.
+    // XXXXXXXX
+    LOG_DEBUG(this_node->debug, "geoOnly is " << this_node->geoOnly);
+    if (!this_node->geoOnly) {
+        // The first time through we need to create the machinery to use the textures.
+        // We put all of this inside a untility subnet.
+        // We create the subnet with name from our node name, which will make it
+        // unique if another 3mf reader node has also been instantiated.
+        // After creating the utility subnet, we put down a matnet in it.
+        // The we put down a shader inside the matnet and set the path and other parameters.
 
-    // Get the absolute path of the current SOP
-    UT_String ourFullPath; // Full path to our node
-    this_node->getFullPath(ourFullPath);
-    LOG_DEBUG(this_node->debug, "    Full path to our node is " << ourFullPath);
-    UT_String parentPath, ourName;
-    ourFullPath.splitPath(parentPath, ourName); // Split fullPath into parent path and our node name
+        // Get the absolute path of the current SOP
+        UT_String ourFullPath; // Full path to our node
+        this_node->getFullPath(ourFullPath);
+        LOG_DEBUG(this_node->debug, "    Full path to our node is " << ourFullPath);
+        UT_String parentPath, ourName;
+        ourFullPath.splitPath(parentPath, ourName); // Split fullPath into parent path and our node name
 
-    // Tidy up the concatenation using std::string. It seems .buffer() is the HDK way to get the const char*
-    std::string ourNameStr(ourName.buffer());
-    std::string parentPathStr(parentPath.buffer());
+        // Tidy up the concatenation using std::string. It seems .buffer() is the HDK way to get the const char*
+        std::string ourNameStr(ourName.buffer());
+        std::string parentPathStr(parentPath.buffer());
 
-    // Since our node must have a unique name, this ensures the subnet does too
-    std::string subnetNameStr = ourNameStr + "_subnet";
-    LOG_DEBUG(this_node->debug, "    Unique name for subnet node: " << subnetNameStr);
+        // Since our node must have a unique name, this ensures the subnet does too
+        std::string subnetNameStr = ourNameStr + "_subnet";
+        LOG_DEBUG(this_node->debug, "    Unique name for subnet node: " << subnetNameStr);
 
-    // Ensure the path doesn't end up with double slashes if parent is "/"
-    std::string fullSubnetPathStr;
-    if (parentPathStr == "/") {
-        fullSubnetPathStr = "/" + subnetNameStr;
-    } else {
-        fullSubnetPathStr = parentPathStr + "/" + subnetNameStr;
+        // Ensure the path doesn't end up with double slashes if parent is "/"
+        std::string fullSubnetPathStr;
+        if (parentPathStr == "/") {
+            fullSubnetPathStr = "/" + subnetNameStr;
+        } else {
+            fullSubnetPathStr = parentPathStr + "/" + subnetNameStr;
+        }
+
+        // Assign back to UT_String members -- subnetPath is just for debugging really
+        this_node->subnetPath = fullSubnetPathStr.c_str();
+
+        LOG_DEBUG(this_node->debug, "    Parent: " << parentPath);
+        LOG_DEBUG(this_node->debug, "    Subnet Path: " << this_node->subnetPath);
+        LOG_DEBUG(false, "    utility subnet path is " << this_node->subnetPath);
+
+        std::string script;
+        script += "import hou\n";
+
+        // Find or create the parent and subnet
+        script += "parent = hou.node('" + parentPathStr + "')\n";
+        script += "subnet = parent.node('" + subnetNameStr + "') or parent.createNode('subnet', '" + subnetNameStr + "')\n";
+
+        // Find or create the material network
+        script += "matnet = subnet.node('3mf_materials') or subnet.createNode('matnet', '3mf_materials')\n";
+
+        script += "if matnet:\n";
+        // Find or Create the shader
+        script += "    shader = matnet.node('master_3mf_shader') or matnet.createNode('principledshader', 'master_3mf_shader')\n";
+        script += "    \n";
+        // Set parameters for the material texture override
+        script += "    shader.setParms({\n";
+        script += "        'basecolor_useTexture': 1,\n"; // Enables the texture slot
+        script += "        'basecolorr': 1.0,\n";        // White base color (1.0 multiplier)
+        script += "        'basecolorg': 1.0,\n";
+        script += "        'basecolorb': 1.0\n";
+        script += "    })\n";
+        script += "    \n";
+        // Visual polish and a note for the user
+        script += "    shader.setColor(hou.Color((0.0, 0.4, 0.4)))\n"; // Teal node color
+        script += "    shader.setComment('3MF Master Shader: Driven by material_override attribute.')\n";
+        script += "    shader.setGenericFlag(hou.nodeFlag.DisplayComment, True)\n";
+        script += "    \n";
+        // Organization and viewport nudge -- does that matter? XXX
+        script += "    matnet.layoutChildren()\n";
+        script += "    hou.hscript('glcache -m 5000')\n";
+
+        // Execute the final script
+        PYrunPythonStatements(script.c_str());
+
+        this_node->shaderNode = fullSubnetPathStr + "/3mf_materials/master_3mf_shader";
+        // Find the node
+        OP_Node* shaderNode = OPgetDirector()->findNode(this_node->shaderNode);
+        if (!shaderNode) {
+            // This is the only way I can figure out to show there was an error in the callback itself.
+            PYrunPythonStatements("import hou\nhou.ui.displayMessage('Failed to create shader node for potential textures.', severity=hou.severityType.Error)");
+        }
+        LOG_DEBUG(this_node->debug, "    Set shaderNode path to " << this_node->shaderNode);
     }
-
-    // Assign back to UT_String members -- subnetPath is just for debugging really
-    this_node->subnetPath = fullSubnetPathStr.c_str();
-
-    LOG_DEBUG(this_node->debug, "    Parent: " << parentPath);
-    LOG_DEBUG(this_node->debug, "    Subnet Path: " << this_node->subnetPath);
-    LOG_DEBUG(false, "    utility subnet path is " << this_node->subnetPath);
-
-    std::string script;
-    script += "import hou\n";
-
-    // Find or create the parent and subnet
-    script += "parent = hou.node('" + parentPathStr + "')\n";
-    script += "subnet = parent.node('" + subnetNameStr + "') or parent.createNode('subnet', '" + subnetNameStr + "')\n";
-
-    // Find or create the material network
-    script += "matnet = subnet.node('3mf_materials') or subnet.createNode('matnet', '3mf_materials')\n";
-
-    script += "if matnet:\n";
-    // Find or Create the shader
-    script += "    shader = matnet.node('master_3mf_shader') or matnet.createNode('principledshader', 'master_3mf_shader')\n";
-    script += "    \n";
-    // Set parameters for the material texture override
-    script += "    shader.setParms({\n";
-    script += "        'basecolor_useTexture': 1,\n"; // Enables the texture slot
-    script += "        'basecolorr': 1.0,\n";        // White base color (1.0 multiplier)
-    script += "        'basecolorg': 1.0,\n";
-    script += "        'basecolorb': 1.0\n";
-    script += "    })\n";
-    script += "    \n";
-    // Visual polish and a note for the user
-    script += "    shader.setColor(hou.Color((0.0, 0.4, 0.4)))\n"; // Teal node color
-    script += "    shader.setComment('3MF Master Shader: Driven by material_override attribute.')\n";
-    script += "    shader.setGenericFlag(hou.nodeFlag.DisplayComment, True)\n";
-    script += "    \n";
-    // Organization and viewport nudge -- does that matter? XXX
-    script += "    matnet.layoutChildren()\n";
-    script += "    hou.hscript('glcache -m 5000')\n";
-
-    // Execute the final script
-    PYrunPythonStatements(script.c_str());
-
-    this_node->shaderNode = fullSubnetPathStr + "/3mf_materials/master_3mf_shader";
-    // Find the node
-    OP_Node* shaderNode = OPgetDirector()->findNode(this_node->shaderNode);
-    if (!shaderNode) {
-        // This is the only way I can figure out to show there was an error in the callback itself.
-        PYrunPythonStatements("import hou\nhou.ui.displayMessage('Failed to create shader node for potential textures.', severity=hou.severityType.Error)");
-    }
-    LOG_DEBUG(this_node->debug, "    Set shaderNode path to " << this_node->shaderNode);
-
+    // XXXXXXXXX
     // Now read in the 3mf file and create the geometry
     this_node->loadGeometry = true; // So cookMySop knows to read the 3mf file
     this_node->forceRecook(); // Cause node to cook again
@@ -1395,10 +1435,14 @@ SOP_Read3mf::parseModel(std::string the_model) {
 
     printMap(buildDict, "buildDict", this->debug);
     printMap(vertexDict, "vertexDict", this->debug);
-    printMap(objectDict, "objectDict", this->debug);
-    printMap(texture2dgroupDict, "texture2dgroupDict", this->debug);
-    printMap(shaderDict, "shaderDict", this->debug);
-    printMap(textureFilesDict, "textureFilesDict", this->debug);
+    printObjectMap(objectDict, "objectDict", this->debug);
+    // XXXXXXX
+    if (!this->geoOnly) {
+        printMap(texture2dgroupDict, "texture2dgroupDict", this->debug);
+        printMap(shaderDict, "shaderDict", this->debug);
+        printMap(textureFilesDict, "textureFilesDict", this->debug);
+    }
+    // XXXXXX
 
     LOG_DEBUG(this->debug, "Exiting parseModel");
     return ErrorCode::SUCCESS;
@@ -1421,22 +1465,24 @@ SOP_Read3mf::handleResources(XMLElement* element) {
         std::string tag_name(tag_name_cstr ? tag_name_cstr : ""); // Safely get tag name
         if (tag_name == "object") {
             err = handleObject(descendant);
-        } else if (tag_name == "m:colorgroup") {
-            err = handleColorgroup(descendant);
-        } else if (tag_name == "m:texture2d") {
-            err = handleTexture2d(descendant);
-        } else if (tag_name == "m:texture2dgroup") {
-            err = handleTexture2dgroup(descendant);
-        } else if (tag_name == "basematerials") {
-            err = handleBasematerials(descendant);
-        } else if (tag_name == "m:multiproperties") {
-            err = handleMultiproperties(descendant);
-        } else if (tag_name == "m:compositematerials") {
-            std::cerr << "Warning: We do not yet handle composite materials, so results might be suspect." << std::endl;
-        } else {
-            // Use std::string for warning message formatting
-            std::cerr << "[Warning: We do not yet handle the resource " << tag_name << ", so results might be suspect." << std::endl;
-        }
+        } else if (!this->geoOnly) { // XXXXXXX
+            if (tag_name == "m:colorgroup") {
+                err = handleColorgroup(descendant);
+            } else if (tag_name == "m:texture2d") {
+                err = handleTexture2d(descendant);
+            } else if (tag_name == "m:texture2dgroup") {
+                err = handleTexture2dgroup(descendant);
+            } else if (tag_name == "basematerials") {
+                err = handleBasematerials(descendant);
+            } else if (tag_name == "m:multiproperties") {
+                err = handleMultiproperties(descendant);
+            } else if (tag_name == "m:compositematerials") {
+                std::cerr << "Warning: We do not yet handle composite materials, so results might be suspect." << std::endl;
+            } else {
+                // Use std::string for warning message formatting
+                std::cerr << "[Warning: We do not yet handle the resource " << tag_name << ", so results might be suspect." << std::endl;
+            }
+        } // XXXXX I think it's okay if we don't do an else here when we're only doing geometry
 
         if (err != ErrorCode::SUCCESS) {
             return err;
@@ -2329,7 +2375,7 @@ SOP_Read3mf::handleObject(XMLElement* element) {
     LOG_DEBUG(this->debug, "    for objectID " << id);
 
     if (objectDict.count(id) == 0) {
-        ObjectData* data = new ObjectData(); // This is our only new of this object. We do the clean-up in clearData().
+        ObjectData* data = new ObjectData(); // This is our only "new" of this object. We do the clean-up in clearData().
         data->id = id;
         objectDict[id] = data; // Store the ptr not the whole thing in case of resizing of the dictionary
         LOG_DEBUG(this->debug, "    Created objectID entry for object " << id);
@@ -2382,86 +2428,93 @@ SOP_Read3mf::handleObject(XMLElement* element) {
             LOG_DEBUG(false, "Object id " << id << " has the name " << name << ".");
         }
     }
-    const char* pid_cstr = element->Attribute("pid");
-    int pid = -1;
-    if (pid_cstr != nullptr) {
-        try {
-            pid = std::stoi(pid_cstr);
-        } catch (const std::exception& e) {
-            std::cerr << "Error: The pid is not a valid integer." << std::endl;
-            return ErrorCode::BAD_3MF;
-        }
-    }
-    objectDict[id]->defaultColorGroup = pid; // defaultColorGroup will be -1 if there was no pid
-    LOG_DEBUG(false, "Object id " << id << " has pid " << pid << ".");
-    const char* pindex_cstr = element->Attribute("pindex");
-    int pindex = -1;
-    if (pindex_cstr != nullptr) {
-        try {
-            pindex = std::stoi(pindex_cstr);
-        } catch (const std::exception& e) {
-            std::cerr << "Error: The pindex is not a valid integer." << std::endl;
-            return ErrorCode::BAD_3MF;
-        }
-        if (pindex != -1 && pid == -1) {
-            std::cerr << "Error: Object " << std::to_string(id) << " has no default color or texture group but has an index into one. This is an error." << std::endl;
-            return ErrorCode::BAD_3MF;
-        }
-    }
-    
-    LOG_DEBUG(false, "Object id " << id << " has pindex " << pindex << ".");
 
-    UT_String defaultColor = DEFAULT_COLOR.data(); // This also covers the case where pid == -1
-    auto itc = colorDict.find(pid);
-    auto itb = basematDict.find(pid);
-    auto itt = texture2dgroupDict.find(pid);
-    auto itm = multiPids.find(pid);
+    // XXXXXX
+    if (!this->geoOnly) {
+        const char* pid_cstr = element->Attribute("pid");
+        int pid = -1;
+        if (pid_cstr != nullptr) {
+            try {
+                pid = std::stoi(pid_cstr);
+            } catch (const std::exception& e) {
+                std::cerr << "Error: The pid is not a valid integer." << std::endl;
+                return ErrorCode::BAD_3MF;
+            }
+        }
+        objectDict[id]->defaultColorGroup = pid; // defaultColorGroup will be -1 if there was no pid
+        LOG_DEBUG(this->debug, "Object id " << id << " has pid " << pid << ".");
+        const char* pindex_cstr = element->Attribute("pindex");
+        int pindex = -1;
+        if (pindex_cstr != nullptr) {
+            try {
+                pindex = std::stoi(pindex_cstr);
+            } catch (const std::exception& e) {
+                std::cerr << "Error: The pindex is not a valid integer." << std::endl;
+                return ErrorCode::BAD_3MF;
+            }
+            if (pindex != -1 && pid == -1) {
+                std::cerr << "Error: Object " << std::to_string(id) << " has no default color or texture group but has an index into one. This is an error." << std::endl;
+                return ErrorCode::BAD_3MF;
+            }
+        }
+        
+        LOG_DEBUG(this->debug, "Object id " << id << " has pindex " << pindex << ".");
 
-    if (itc != colorDict.end()) {
-        std::vector<std::string> colorArray = itc->second;
-        std::string color = itc->second[pindex];
-        LOG_DEBUG(false, "We got color " << color << " in colorDict");
-        defaultColor = color;
-    } else if (itb != basematDict.end()) {
-        std::string displayColor = itb->second[pindex];
-        defaultColor = displayColor;
-        LOG_DEBUG(false, "We got displayColor " << displayColor << " in basematDict");
-    } else if (itt != texture2dgroupDict.end()) {
-        std::string texturePathFs;
-        auto itf = texture2dgroupDict.find(pid);
-        if (itf != texture2dgroupDict.end()) {
-            texturePathFs = itf->second.texturePath; 
-        } else {
-            std::cerr << "No texture found for object  " << id << " pid " << pid << std::endl;
+        UT_String defaultColor = DEFAULT_COLOR.data(); // This also covers the case where pid == -1
+        auto itc = colorDict.find(pid);
+        auto itb = basematDict.find(pid);
+        auto itt = texture2dgroupDict.find(pid);
+        auto itm = multiPids.find(pid);
+
+        if (itc != colorDict.end()) {
+            std::vector<std::string> colorArray = itc->second;
+            std::string color = itc->second[pindex];
+            LOG_DEBUG(this->debug, "We got color " << color << " in colorDict");
+            defaultColor = color;
+        } else if (itb != basematDict.end()) {
+            std::string displayColor = itb->second[pindex];
+            defaultColor = displayColor;
+            LOG_DEBUG(this->debug, "We got displayColor " << displayColor << " in basematDict");
+        } else if (itt != texture2dgroupDict.end()) {
+            std::string texturePathFs;
+            auto itf = texture2dgroupDict.find(pid);
+            if (itf != texture2dgroupDict.end()) {
+                texturePathFs = itf->second.texturePath; 
+            } else {
+                std::cerr << "No texture found for object  " << id << " pid " << pid << std::endl;
+                return ErrorCode::OTHER;
+            }
+
+            std::vector<std::array<float, 2>> coordArray = itt->second.coords;
+            if (coordArray.size() <= pindex || pindex < 0) {
+                std::cerr << "Error: Index into array of texture coordinates is out of bounds." << std::endl;
+                LOG_DEBUG(false, "pindex is " << pindex << " and size of coordArray is " << coordArray.size());
+                return ErrorCode::BAD_3MF;
+            }
+            const std::array<float, 2> uvcoords = coordArray[pindex];
+            LOG_DEBUG(false, "In handle object we got default texture coords of [" << uvcoords[0] << ", " << uvcoords[1] << "]");
+            
+            PixelColor color;
+            if (colormap(texturePathFs, uvcoords, color, this->debug) != ErrorCode::SUCCESS) {
+                std::cerr << "Unable to get color of pixel in default texture for objectID " << id << std::endl;
+                return ErrorCode::OTHER;
+            }
+            LOG_DEBUG(false, "Got default object color of [" << color.r << ", " << color.g
+                << ", " << color.b << "] plus alpha " << color.a);
+            
+            defaultColor = convertColorToHexString(color, this->debug);
+            LOG_DEBUG(false, "Converted default color to hex string: " << defaultColor);
+
+        } else if (itm != multiPids.end()) {
+            std::cerr << "We do not yet handle multi-properties." << std::endl;
             return ErrorCode::OTHER;
         }
 
-        std::vector<std::array<float, 2>> coordArray = itt->second.coords;
-        if (coordArray.size() <= pindex || pindex < 0) {
-            std::cerr << "Error: Index into array of texture coordinates is out of bounds." << std::endl;
-            LOG_DEBUG(false, "pindex is " << pindex << " and size of coordArray is " << coordArray.size());
-            return ErrorCode::BAD_3MF;
-        }
-        const std::array<float, 2> uvcoords = coordArray[pindex];
-        LOG_DEBUG(false, "In handle object we got default texture coords of [" << uvcoords[0] << ", " << uvcoords[1] << "]");
-        
-        PixelColor color;
-        if (colormap(texturePathFs, uvcoords, color, this->debug) != ErrorCode::SUCCESS) {
-            std::cerr << "Unable to get color of pixel in default texture for objectID " << id << std::endl;
-            return ErrorCode::OTHER;
-        }
-        LOG_DEBUG(false, "Got default object color of [" << color.r << ", " << color.g
-            << ", " << color.b << "] plus alpha " << color.a);
-        
-        defaultColor = convertColorToHexString(color, this->debug);
-        LOG_DEBUG(false, "Converted default color to hex string: " << defaultColor);
-
-    } else if (itm != multiPids.end()) {
-        std::cerr << "We do not yet handle multi-properties." << std::endl;
-        return ErrorCode::OTHER;
+        // I have to call harden() here. Simple assignment is just a pointer and what it points to goes away.
+        // This way it is allocated on the heap and stays until cleaned up in clearData().
+        objectDict[id]->defaultColor.harden(defaultColor.buffer());
     }
-
-    objectDict[id]->defaultColor = defaultColor;
+    // XXXXXXXX
 
     // Now handle child elements of the object
     tinyxml2::XMLElement* descendant = element->FirstChildElement();
@@ -2511,7 +2564,6 @@ SOP_Read3mf::handleObject(XMLElement* element) {
 
         descendant = descendant->NextSiblingElement();
     }
-
     LOG_DEBUG(this->debug, "Exiting handleObject");
 
     return ErrorCode::SUCCESS;
@@ -2794,43 +2846,53 @@ SOP_Read3mf::handleTriangles(XMLElement* element, int& numTriangles, const int o
     //}
     // Does the above guarantee it's a color attribute?? XXX
     //GA_RWHandleV3 Cd_h(objGdp->findDiffuseAttribute(GA_ATTRIB_VERTEX));
-    GA_RWHandleV3 Cd_h = GA_RWHandleV3(objGdp->addFloatTuple(GA_ATTRIB_VERTEX, "Cd", 3, GA_Defaults(1.0)));
-    Cd_h->setTypeInfo(GA_TYPE_COLOR);
-    if (!Cd_h.isValid()) {
-        addError(SOP_MESSAGE, "Color attribute handle is invalid after its creation.");
-        std::cerr << "Error: Color attribute handle is invalid after its creation for object " << objID << std::endl;
-        return ErrorCode::OTHER;
-    }
+    // XXXXXX
+    // These are safely invalid when declared this way.
+    GA_RWHandleV3 Cd_h;
+    GA_RWHandleV3 UV_h;
+    GA_RWHandleS material_h;
+    GA_RWHandleS override_h;
 
-    // I should be able to use GEO_STD_ATTRIB_TEXTURE in place of "uv", but it seems I can't
+    if (!this->geoOnly) {
+        Cd_h = GA_RWHandleV3(objGdp->addFloatTuple(GA_ATTRIB_VERTEX, "Cd", 3, GA_Defaults(1.0)));
+        Cd_h->setTypeInfo(GA_TYPE_COLOR);
+        if (!Cd_h.isValid()) {
+            addError(SOP_MESSAGE, "Color attribute handle is invalid after its creation.");
+            std::cerr << "Error: Color attribute handle is invalid after its creation for object " << objID << std::endl;
+            return ErrorCode::OTHER;
+        }
 
-    GA_RWHandleV3 UV_h = GA_RWHandleV3(objGdp->addFloatTuple(GA_ATTRIB_VERTEX, "uv", 3, GA_Defaults(0.0)));
-    if (!UV_h.isValid()) {
-        addError(SOP_MESSAGE, "UV attribute handle is invalid after its creation.");
-        std::cerr << "Error: UV attribute handle is invalid for object " << objID << " after its creation." << std::endl;
-        return ErrorCode::OTHER;
-    }
-    UV_h->setTypeInfo(GA_TYPE_TEXTURE_COORD);
+        // I should be able to use GEO_STD_ATTRIB_TEXTURE in place of "uv", but it seems I can't
 
-    // I should be able to use GEO_STD_ATTRIB_MATERIAL in place of "shop_materialpath", but it seems I can't
-    //GA_RWHandleS material_h = GA_RWHandleS(objGdp->addStringTuple(GA_ATTRIB_PRIMITIVE, "shop_materialpath", 1));
-    GA_RWHandleS material_h = GA_RWHandleS(objGdp->addStringTuple(GA_ATTRIB_PRIMITIVE, "shop_materialpath", 1));
-    if (!material_h.isValid()) {
-        addError(SOP_MESSAGE, "material path attribute handle is invalid after its creation.");
-        std::cerr << "Error: material path attribute handle is invalid for object " << objID << " after its creation." << std::endl;
-        return ErrorCode::OTHER;
-    }
+        UV_h = GA_RWHandleV3(objGdp->addFloatTuple(GA_ATTRIB_VERTEX, "uv", 3, GA_Defaults(0.0)));
+        if (!UV_h.isValid()) {
+            addError(SOP_MESSAGE, "UV attribute handle is invalid after its creation.");
+            std::cerr << "Error: UV attribute handle is invalid for object " << objID << " after its creation." << std::endl;
+            return ErrorCode::OTHER;
+        }
+        UV_h->setTypeInfo(GA_TYPE_TEXTURE_COORD);
 
-    // XXX For strings Houdini has to do a lookup to see if the string already exists so it can use the right index
-    // for the string in the attribute. So maybe I should do this once for all the primitives in the new range
-    // once I leave handleTriangle() XXX
-    // Create an attribute to store the specific texture path for each primitive
-    GA_RWHandleS override_h(objGdp->addStringTuple(GA_ATTRIB_PRIMITIVE, "material_override", 1));
-    if (!override_h.isValid()) {
-        addError(SOP_MESSAGE, "override attribute handle is invalid after its creation.");
-        std::cerr << "Error: override attribute handle is invalid for object " << objID << " after its creation." << std::endl;
-        return ErrorCode::OTHER;
+        // I should be able to use GEO_STD_ATTRIB_MATERIAL in place of "shop_materialpath", but it seems I can't
+        //GA_RWHandleS material_h = GA_RWHandleS(objGdp->addStringTuple(GA_ATTRIB_PRIMITIVE, "shop_materialpath", 1));
+        material_h = GA_RWHandleS(objGdp->addStringTuple(GA_ATTRIB_PRIMITIVE, "shop_materialpath", 1));
+        if (!material_h.isValid()) {
+            addError(SOP_MESSAGE, "material path attribute handle is invalid after its creation.");
+            std::cerr << "Error: material path attribute handle is invalid for object " << objID << " after its creation." << std::endl;
+            return ErrorCode::OTHER;
+        }
+
+        // XXX For strings Houdini has to do a lookup to see if the string already exists so it can use the right index
+        // for the string in the attribute. So maybe I should do this once for all the primitives in the new range
+        // once I leave handleTriangle() XXX
+        // Create an attribute to store the specific texture path for each primitive
+        override_h = GA_RWHandleS(objGdp->addStringTuple(GA_ATTRIB_PRIMITIVE, "material_override", 1));
+        if (!override_h.isValid()) {
+            addError(SOP_MESSAGE, "override attribute handle is invalid after its creation.");
+            std::cerr << "Error: override attribute handle is invalid for object " << objID << " after its creation." << std::endl;
+            return ErrorCode::OTHER;
+        }
     }
+    // XXXXXXXX
 
     UT_Map<PointKey, GA_Offset> localPointDict;
 
@@ -2891,7 +2953,7 @@ SOP_Read3mf::handleTriangle(XMLElement* element, int& numTriangles, const int ob
     LOG_DEBUG(false, "Entering handleTriangle");
 
     UT_String defaultColor = this->objectDict[objID]->defaultColor;
-    LOG_DEBUG(false, "    Got default color of " << defaultColor << " from object");
+    LOG_DEBUG(false, "    Got default color of " << defaultColor << " from object " << objID);
     LOG_DEBUG(false, "    We currently have " << objGdp->getNumPoints() << " points, "
         << objGdp->getNumVertices() << " vertices, and " << objGdp->getNumPrimitives() << " prims");
 
@@ -3016,6 +3078,12 @@ SOP_Read3mf::handleTriangle(XMLElement* element, int& numTriangles, const int ob
     obj_h.set(primOff, objID);
     LOG_DEBUG(false, "    Got " + std::to_string(primOff) + " for the prim offset.");
 
+    // XXXXXX
+    if (this->geoOnly) {
+        return ErrorCode::SUCCESS;
+    }
+    // XXXXXXX
+
     //
     // Now Look for texture/color/etc. on the triangles.
     //
@@ -3076,7 +3144,7 @@ SOP_Read3mf::handleTriangle(XMLElement* element, int& numTriangles, const int ob
         LOG_DEBUG(false, std::string("We got multi "));
         useMulti = true;
     } else if (groupID != -1) { // We were reset by something, but it's not something we recognize
-        LOG_DEBUG(true, std::string("Warning: A triangle has an unknown property: ") + std::to_string(groupID)
+        LOG_DEBUG(false, std::string("Warning: A triangle has an unknown property: ") + std::to_string(groupID)
             + std::string(" -- assigning default color"));
         groupID = -1;
     } // Otherwise there's nothing, so we leave groupID at -1 so we get the default color
@@ -3103,7 +3171,7 @@ SOP_Read3mf::handleTriangle(XMLElement* element, int& numTriangles, const int ob
         p2 = p3 = p1; // SPEC says: If p2 or p3 is unspecified then p1 is used for the entire triangle.
     }
     if (groupID == -1 && p1 != -1) { // Is this what I should do? Or let obj default override? But indices could be wrong for that XXX
-        LOG_DEBUG(true, "Warning: A triangle has no ID signifying which color/texture/multi group to use, but it specified indices into an unknown group. Assigning default color.");
+        LOG_DEBUG(false, "Warning: A triangle has no ID signifying which color/texture/multi group to use, but it specified indices into an unknown group. Assigning default color.");
         p1 = p2 = p3 = -1; // Use default color from the object
     }
     if (p1 == -1 && p2 == -1 && p3 == -1) { // We have to use the object default color

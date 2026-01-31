@@ -211,6 +211,7 @@ namespace HDK_Sample {
         // Dealing with node parameters
         bool                FLIP(fpreal t) { return evalInt("flip", 0, t); }
         bool                BUILD(fpreal t) { return evalInt("build", 0, t); }
+        bool                GEO(fpreal t) { return evalInt("geo", 0, t); }
         bool                TIMER(fpreal t) { return evalInt("timer", 0, t); }
         void                FILENAME(std::string& my_file, fpreal t)    { UT_StringHolder result; evalString(result, "filename", 0, t); my_file = result.toStdString(); return;}
         void                ASSETS(std::string& my_assets, fpreal t)   { UT_StringHolder result; evalString(result, "assets", 0, t); my_assets = result.toStdString(); return;}
@@ -219,6 +220,7 @@ namespace HDK_Sample {
         bool                flip;
         bool                timer;
         bool                build;
+        bool                geoOnly;
         bool                debug;
         std::string         assets;
 
