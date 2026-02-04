@@ -59,6 +59,8 @@
 #include <VOP/VOP_Node.h>
 //#include <UT/UT_Error.h>
 #include <PY/PY_Python.h>
+#include <PY/PY_AutoObject.h>
+#include <PY/PY_InterpreterAutoLock.h>
 #include <filesystem>
 #include <sys/stat.h>
 #include <minizip/zip.h>
@@ -356,6 +358,40 @@ unzipArchive(const std::string& filename, const std::string& extractFolder) {
 
 
 //
+// Determine which types of decor decorate this model, if any.
+//
+class DecorFeatureVisitor : public tinyxml2::XMLVisitor {
+public:
+    // Boolean flags for each specific 3MF feature
+    bool hasColorGroups = false;
+    bool hasTextureGroups = false;
+    bool hasBaseMaterials = false;
+    bool hasMultiProperties = false;
+    bool hasCompositeMaterials = false;
+
+    virtual bool VisitEnter(const tinyxml2::XMLElement& element, const tinyxml2::XMLAttribute*) override {
+        const char* name = element.Value();
+        if (!name) return true;
+
+        // Check each tag and set the corresponding flag
+        if      (!strcmp(name, "m:colorgroup"))         hasColorGroups = true;
+        else if (!strcmp(name, "m:texture2dgroup"))     hasTextureGroups = true;
+        else if (!strcmp(name, "basematerials"))        hasBaseMaterials = true;
+        else if (!strcmp(name, "m:multiproperties"))    hasMultiProperties = true;
+        else if (!strcmp(name, "m:compositematerials")) hasCompositeMaterials = true;
+
+        // Optimization: If all flags are true, we can stop scanning the XML
+        if (hasColorGroups && hasTextureGroups && hasBaseMaterials && 
+            hasMultiProperties && hasCompositeMaterials) {
+            return false; 
+        }
+
+        return true; // Keep walking the tree
+    }
+};
+
+
+//
 // Get a timestamp accurate enough for millisecond measurements.
 //
 //std::chrono::time_point<std::chrono::system_clock>
@@ -393,8 +429,6 @@ parseTransformString(const std::string& transformString, UT_Matrix4& matrix) {
         // Map the flat index (0-11) to the matrix (row, col) indices:
         int row = index / 3;
         int col = index % 3;
-        LOG_DEBUG(false, "    (" + std::to_string(row) + ", " + std::to_string(col) + ")"
-            + " has value " + std::to_string(value));
         matrix(row, col) = value;
 
         index++;
@@ -507,7 +541,7 @@ colormap(std::string texturePath, const std::array<float, 2>& uv, PixelColor& co
     color.a = data[index + 3] / 255.0f;
 
     stbi_image_free(data);
-    LOG_DEBUG(debug, "    Got r, g, b, a of " + std::to_string(color.r) + ", " + std::to_string(color.g)
+    LOG_DEBUG(debug, "Got r, g, b, a of " + std::to_string(color.r) + ", " + std::to_string(color.g)
         + ", " + std::to_string(color.b) + ", " + std::to_string(color.a));
 
     LOG_DEBUG(debug, "Exiting colormap.");
@@ -628,7 +662,11 @@ void printObjectMap(const UT_Map<int, ObjectData*>& map, const std::string& name
 
 
 //
-// Clear and reset class data structures.
+// Clear and reset class data structures. Do not destroy any existing subnet here, as this can cause crashes.
+// If a user closes HOudini or deletes a part of a network, Houdini chooses the order in which nodes are
+// destoryed. So a destroy in the destructor could try to destroy a node Houdini has already destroyed.
+// I think it's okay to leave the subnet even if the read SOP is removed by the user. They can remove the
+// subnet too if they wish. Instead, the subnet is removed in the read() callback.
 //
 SOP_Read3mf::ErrorCode
 SOP_Read3mf::clearData() {
@@ -646,11 +684,14 @@ SOP_Read3mf::clearData() {
             delete data;
         }
     }
+
+    // Might have to do a model_doc.Cear() if I keep the model open across read/cookMySop XXXXX
+
     this->objectDict.clear();
     this->colorDict.clear();
     this->basematDict.clear();
     this->texture2dgroupDict.clear();
-    this->multiPids.clear();
+    this->multiDict.clear();
     this->vertexDict.clear();
     //this->pointDict.clear();
     this->textureModifyUVsDict.clear();
@@ -660,6 +701,11 @@ SOP_Read3mf::clearData() {
     this->buildDict.clear();
 
     this->scale_factor = 1.0f; // Read from 3mf file, so needs to be reset
+    this->hasColor = false;
+    this->hasTexture = false;
+    this->hasBase = false;
+    this->hasMulti = false;
+    this->hasComp = false;
 
     LOG_DEBUG(this->debug, "Exiting clearData");
 
@@ -675,7 +721,7 @@ getFileInfo(std::string path, std::string &dir, std::string &stem, std::string &
     LOG_DEBUG(false, "Entering getFileInfo.");
     
     // Set up pieces we'll use if we need to create a new texture file.
-    LOG_DEBUG(false, "    Entering with path = " + path);
+    LOG_DEBUG(false, "Entering with path = " + path);
 
     // Create a std::filesystem::path object from the string
     std::filesystem::path full_path(path);
@@ -824,7 +870,7 @@ textureMirrorMirror(unsigned char* originalData, int width, int height, int numC
         std::cerr << "Error writing double-mirrored image to: " << usePath << std::endl;
         return false;
     }
-    LOG_DEBUG(debug, "    Usepath is now " << usePath);
+    LOG_DEBUG(debug, "Usepath is now " << usePath);
 
     return true;
 }
@@ -936,6 +982,187 @@ textureWrapMirror(unsigned char* originalData, int width, int height, int numCha
 }
 
 
+//
+// Set up the machinery for reading in models that have textures or multi-properties. This gets us as far as
+// having a subnet with a matnet inside it.
+// If we later decide this has to be done in the read() function and not in a node that gets recooked, then
+// I'll need a SOP_Read3mf *me parameter. For now, I'll just assume "this".
+//
+void
+SOP_Read3mf::matnetSetup() {
+    LOG_DEBUG(this->debug, "Entering matnetSetup");
+
+    // The first time through we need to create the machinery to use textures or multi-properties.
+    // We put all of this inside a untility subnet.
+    // We create the subnet with name from our node name, which will make it
+    // unique if another 3mf reader node has also been instantiated.
+    // After creating the utility subnet, we put down a matnet in it.
+
+    // Get the absolute path of the current SOP
+    UT_String ourFullPath; // Full path to our node
+    this->getFullPath(ourFullPath);
+    LOG_DEBUG(this->debug, "Full path to our node is " << ourFullPath);
+    UT_String parentPath, ourName;
+    ourFullPath.splitPath(parentPath, ourName); // Split fullPath into parent path and our node name
+
+    // Tidy up the concatenation using std::string. It seems .buffer() is the HDK way to get the const char*
+    std::string ourNameStr(ourName.buffer());
+    std::string parentPathStr(parentPath.buffer());
+
+    // Since our node must have a unique name, this ensures the subnet does too
+    std::string subnetNameStr = ourNameStr + "_subnet";
+    LOG_DEBUG(this->debug, "Unique name for subnet node: " << subnetNameStr);
+
+    // Ensure the path doesn't end up with double slashes if parent is "/"
+    std::string fullSubnetPathStr;
+    if (parentPathStr == "/") {
+        fullSubnetPathStr = "/" + subnetNameStr;
+    } else {
+        fullSubnetPathStr = parentPathStr + "/" + subnetNameStr;
+    }
+
+    // Assign back to UT_String members -- subnetPath is just for debugging really
+    //this->subnetPath = fullSubnetPathStr.c_str();
+    this->subnetPath.harden(fullSubnetPathStr.c_str()); // the subnetPath was getting lost across read callbacks.
+
+    LOG_DEBUG(this->debug, "Parent: " << parentPath);
+    LOG_DEBUG(this->debug, "Subnet Path: " << this->subnetPath);
+
+    std::string script;
+    script += "import hou\n";
+
+    // Find or create the parent and subnet
+    script += "parent = hou.node('" + parentPathStr + "')\n";
+    script += "subnet = parent.node('" + subnetNameStr + "') or parent.createNode('subnet', '" + subnetNameStr + "')\n";
+
+    // Find or create the material network
+    script += "matnetStr = (subnet.node('3mf_materials') or subnet.createNode('matnet', '3mf_materials')).path()\n";
+    script += "hou.hscript('glcache -m 5000')\n";
+
+    LOG_DEBUG(this->debug, "We now have script of \n" << script);
+
+    PY_InterpreterAutoLock pyLock;
+    LOG_DEBUG(this->debug, "Got autoLock");
+    // Execute the final script
+    PYrunPythonStatements(script.c_str());
+    LOG_DEBUG(this->debug, "Returned from python execution.");
+
+    /*
+    // If the script had an IndentationError, this will print it to the terminal
+    if (PyErr_Occurred()) {
+        PyErr_Print(); 
+        PyErr_Clear();
+    }
+    */
+
+    UT_String matnetPath;
+
+    // Use the PY_ prefix for the import
+    PY_AutoObject main_module(PY_PyImport_ImportModule("__main__"));
+    LOG_DEBUG(this->debug, "Did PyAutoObject");
+
+    if (main_module) {
+        // Use .operator->() as it is the most compatible way to get the PyObject*
+        PY_PyObject *dict = PY_PyModule_GetDict(main_module.operator->());
+        LOG_DEBUG(this->debug, "Did dict");
+        PY_PyObject *py_val = PY_PyDict_GetItemString(dict, "matnetStr");
+        LOG_DEBUG(this->debug, "Did py_val");
+
+        if (py_val) {
+            LOG_DEBUG(this->debug, "py_val is valid");
+            // Try the alias that usually exists in all HDK versions:
+            const char *path_cstr = PY_PyString_AsString(py_val);        
+            if (path_cstr) {
+                LOG_DEBUG(this->debug, "Got path_cstr " << path_cstr);
+                matnetPath = path_cstr;
+            } else {
+                LOG_DEBUG(this->debug, "py_val exists but could not be converted to string!");
+            }
+        } else {
+            LOG_DEBUG(this->debug, "py_val is NULL - 'matnet' not found in __main__ dict");
+        }
+    }
+
+    if (!matnetPath.isstring()) {
+        std::cerr << "matnetPath created in python is not safe to use." << std::endl;
+        return;
+    }
+    this->matnetPath = matnetPath;
+    LOG_DEBUG(this->debug, "We got matnet from python of " << matnetPath);
+
+/*
+    this->shaderNode = fullSubnetPathStr + "/3mf_materials/master_3mf_shader";
+    // Find the node
+    OP_Node* shaderNode = OPgetDirector()->findNode(this->shaderNode);
+    if (!shaderNode) {
+        // This is the only way I can figure out to show there was an error in the callback itself.
+        PYrunPythonStatements("import hou\nhou.ui.displayMessage('Failed to create shader node for potential textures.', severity=hou.severityType.Error)");
+    }
+    LOG_DEBUG(this->debug, "Set shaderNode path to " << this->shaderNode);
+*/
+    LOG_DEBUG(this->debug, "Exiting matnetSetup");
+    return;
+}
+
+
+//
+// Set up the machinery for reading in models that have textures. We have already set up one matnet.
+// Now we need a principled shader that gets used for all the textures with an override using each texture's name when
+// we come to it.
+//
+void
+SOP_Read3mf::matnetOverrideSetup() {
+    LOG_DEBUG(this->debug, "Entering matnetOverrideSetup");
+
+    LOG_DEBUG(this->debug, "We have matnet path of " << this->matnetPath.buffer());
+
+    std::string script;
+    script += "import hou\n";
+
+    // Find the matnet
+    script += "matnet = hou.node('";
+    script += this->matnetPath.buffer();
+    script += "')\n";
+    script += "if matnet:\n";
+    // Find or Create the shader
+    script += "    shader = matnet.node('master_3mf_shader') or matnet.createNode('principledshader', 'master_3mf_shader')\n";
+    script += "    \n";
+    // Set parameters for the material texture override
+    script += "    shader.setParms({\n";
+    script += "        'basecolor_useTexture': 1,\n"; // Enables the texture slot
+    script += "        'basecolorr': 1.0,\n";        // White base color (1.0 multiplier)
+    script += "        'basecolorg': 1.0,\n";
+    script += "        'basecolorb': 1.0\n";
+    script += "    })\n";
+    script += "    \n";
+    // Visual polish and a note for the user
+    script += "    shader.setColor(hou.Color((0.0, 0.4, 0.4)))\n"; // Teal node color
+    script += "    shader.setComment('3MF Master Shader: Driven by material_override attribute.')\n";
+    script += "    shader.setGenericFlag(hou.nodeFlag.DisplayComment, True)\n";
+    script += "    \n";
+    // Organization and viewport nudge -- does that matter? XXX
+    script += "    matnet.layoutChildren()\n";
+    script += "    hou.hscript('glcache -m 5000')\n";
+
+    // Execute the final script
+    PYrunPythonStatements(script.c_str());
+    LOG_DEBUG(this->debug, "Back from executing python");
+
+    this->shaderPath = this->matnetPath;
+    this->shaderPath += "/master_3mf_shader";
+    LOG_DEBUG(this->debug, "Created shader path of " << this->shaderPath.buffer());
+    // Find the node
+    OP_Node* shaderNode = OPgetDirector()->findNode(this->shaderPath);
+    if (!shaderNode) {
+        // This is the only way I can figure out to show there was an error in the callback itself.
+        PYrunPythonStatements("import hou\nhou.ui.displayMessage('Failed to create shader node for potential textures.', severity=hou.severityType.Error)");
+    }
+    LOG_DEBUG(this->debug, "Set shaderNode path to " << this->shaderPath);
+    LOG_DEBUG(this->debug, "Exiting matnetOverrideSetup");
+    return;
+}
+
+
 /*
  * --------------------------------------------------------------------------------
  * END OF UTILITY FUNCTIONS
@@ -949,6 +1176,7 @@ textureWrapMirror(unsigned char* originalData, int width, int height, int numCha
 OP_Node *
 SOP_Read3mf::myConstructor(OP_Network *net, const char *name, OP_Operator *op)
 {
+    UT_Console::initConsole(); // I maybe don't need this.
     return new SOP_Read3mf(net, name, op);
 }
 
@@ -975,26 +1203,11 @@ SOP_Read3mf::~SOP_Read3mf() {
 // this sop to cook again, with a flag set to make it actually read in the 3mf model and create the geometry.
 //
 OP_ERROR
-SOP_Read3mf::cookMySop(OP_Context &context)
-{
-    fpreal t = context.getTime();
-    UT_Console::initConsole();
+SOP_Read3mf::cookMySop(OP_Context &context) {
+    //fpreal t = context.getTime();
 
     LOG_DEBUG(this->debug, "Entering cookMySop");
-
-    // Set up parameters. We at least need the debug for logging.
-    this->debug = this->DEBUG(t);
-    this->flip = this->FLIP(t);
-    this->build = this->BUILD(t);
-    this->geoOnly = this->GEO(t);
-    this->timer = this->TIMER(t);
-    this->FILENAME(this->filename, t);
-    this->ASSETS(this->assets, t);
-
-    this->start = generateTimestamp();
-    this->t = t;
-
-    LOG_DEBUG(false, "    Cook: We have " << this->gdp->getNumPoints() << " points.");
+    LOG_DEBUG(false, "Cook: We have " << this->gdp->getNumPoints() << " points.");
 
     // Atomically read the current state and set the flag to false (reset)
     // so we don't have two threads possibly trying to load the geometry
@@ -1011,53 +1224,15 @@ SOP_Read3mf::cookMySop(OP_Context &context)
     LOG_DEBUG(false, "We need to load the 3mf file and build the geometry.");
 
     // Clear/reset data structures since the last time we loaded the geometry
-    clearData();
+    // clearData(); // Doing this in read() now
     // Since we have no input, manually clear and prepare the output detail
     this->gdp->appendPoint();
     this->gdp->clearAndDestroy();
 
-    LOG_DEBUG(false, "    After destroy, we have " << this->gdp->getNumPoints() << " points.");
+    LOG_DEBUG(false, "After destroy, we have " << this->gdp->getNumPoints() << " points.");
 
     // Set up our internal error reporting -- will phase this out and shift to Houdini's instead XXX
     SOP_Read3mf::ErrorCode myError = SOP_Read3mf::ErrorCode::SUCCESS;
-
-    // Get the name of the extract folder and create it.
-    if (this->assets.empty()) {
-        std::cerr << "Error: The name of the folder for unpacking the 3mf file is empty." << std::endl;
-        //this->addMessage(SOP_MESSAGE, "Foodle!");
-        //this->addError(SOP_ERR_FILEGEO, "Error: The name of the folder for unpacking the 3mf file is empty.");
-        this->addError(UT_ERROR_ABORT, "Error: The name of the folder for unpacking the 3mf file is empty.");
-        LOG_DEBUG(true, "Error is " << this->error());
-
-        return this->error();
-    }
-
-    // We append the node name to make sure the folder name is unique inside this session.
-    this->extractFolder = this->assets + "/" + this->getName().buffer();
-    LOG_DEBUG(this->debug, "Extract folder is " << this->extractFolder);
-
-     // Get 3mf file to import
-    if (this->filename.empty()) {
-        std::cerr << "Error: The filename for import is empty." << std::endl;
-        //this->addError(SOP_MESSAGE, "Error: The filename for import is empty.");
-        this->addError(SOP_ERR_FILEGEO, "Error: The filename for import is empty.");
-        LOG_DEBUG(true, "Error is " << this->error() << " and UT_ERROR_ABORT is " << UT_ERROR_ABORT);
-        return error();
-    }
-    LOG_DEBUG(this->debug, "The filename for import is " << this->filename);
-
-    std::string suffix = ".3mf";
-    if (this->filename.length() < suffix.length() || (this->filename.rfind(suffix) != this->filename.length() - suffix.length())) {
-        this->filename += suffix;
-    }
-
-    // Unpack the 3mf archive
-    if (unzipArchive(this->filename, this->extractFolder) != ErrorCode::SUCCESS) {
-        std::cerr << "Error: Failed to unzip 3mf archive." << std::endl;
-        this->addError(SOP_MESSAGE, "Error: Failed to unzip the 3mf archive.");
-        return error();
-    }
-    LOG_DEBUG(false, "Finished unzipping archive.");
 
     // Get the name of the model file.
     std::string rels_path;
@@ -1114,115 +1289,148 @@ SOP_Read3mf::cookMySop(OP_Context &context)
 //
 // Note that a callback requires a return value of 0 to indicate failure and 1 for success.
 //
-// In this callback we first create the nodes we'll need for textures.
-// Then we set flags to cause cookMySop to run and to recognize that this time it
-// actually has to do something (i.e. read in the 3mf file and build the geometry). So the division of
-// labor is that the node setup happens here and the geometry setup happens in cookMySop()
+// In this callback we create any subnet/matnet/shader nodes needed to support textures or
+// multi-properties. Apparently it's not okay to do that inside of a cooking sop. So we do that
+// here and then trigger a recook of cookMySop which will just deal with geometry.
 //
 /*static*/ int
-SOP_Read3mf::read(void *data, int index, fpreal t, const PRM_Template *tplate)
-{
+SOP_Read3mf::read(void *data, int index, fpreal t, const PRM_Template *tplate) {
     // Get the node for this instance of the callback
-    SOP_Read3mf *this_node = static_cast<SOP_Read3mf*>(data);
+    SOP_Read3mf *me = static_cast<SOP_Read3mf*>(data);
 
-    if (!this_node) {
+    if (!me) {
         std::cerr << "Error: Unable to retrieve node for this callback" << std::endl;
         return 0;
     }
 
-    LOG_DEBUG(this_node->debug, "Entering read");
+    // Set up parameters. We at least need the debug for logging.
+    me->debug = me->DEBUG(t);
+    me->flip = me->FLIP(t);
+    me->build = me->BUILD(t);
+    me->geoOnly = me->GEO(t);
+    me->timer = me->TIMER(t);
+    me->FILENAME(me->filename, t);
+    me->ASSETS(me->assets, t);
+    me->start = generateTimestamp();
+    me->t = t;
+
+    LOG_DEBUG(me->debug, "Entering read"); // Can't call until we've set up debug flag.
+
+    // Clean up any pre-existing subnet
+    // Get the parent network where your SOP lives
+    OP_Network *parent = me->getParent();
+
+    // The below can be cleaned up if we switch to using a relative path for subnetPath - then we
+    // use the commented out parent stuff and remove the targetParent stuff.
+    // Look for the previously created subnet by name
+    // ===> OR USE THE UNIQUE NODE ID instead.
+    //OP_Node *oldSubnet = parent->findNode(me->subnetPath.buffer());
+    LOG_DEBUG(me->debug, "We have subnetPath of " << me->subnetPath);
+    OP_Node *oldSubnet = me->findNode(me->subnetPath.buffer());
+
+    if (oldSubnet) {
+        // Now destroy it. This also recursively destroys all children (materials, etc.)
+        //parent->destroyNode(oldSubnet);
+        LOG_DEBUG(me->debug, "We found the subnet");
+        OP_Network* targetParent = oldSubnet->getParent();
+        if (targetParent) {
+            LOG_DEBUG(me->debug, "We created the parent node and will now delete the subnet node");
+            targetParent->destroyNode(oldSubnet);
+            LOG_DEBUG(me->debug, "We think we deleted it");
+        }
+        
+        // Clear the name/pointer
+        //me->subnetPath.harden(""); 
+        me->subnetPath.clear();
+    }
+
+    // Clear/reset data structures since the last time we loaded the geometry
+    me->clearData();
+
+    // Get the name of the extract folder and create it.
+    if (me->assets.empty()) {
+        std::cerr << "Error: The name of the folder for unpacking the 3mf file is empty." << std::endl;
+        //me->addMessage(SOP_MESSAGE, "Foodle!");
+        //me->addError(SOP_ERR_FILEGEO, "Error: The name of the folder for unpacking the 3mf file is empty.");
+        me->addError(UT_ERROR_ABORT, "Error: The name of the folder for unpacking the 3mf file is empty.");
+        LOG_DEBUG(true, "Error is " << me->error());
+
+        return me->error();
+    }
+
+    // We append the node name to make sure the folder name is unique inside this session.
+    me->extractFolder = me->assets + "/" + me->getName().buffer();
+    LOG_DEBUG(me->debug, "Extract folder is " << me->extractFolder);
+
+     // Get 3mf file to import
+    if (me->filename.empty()) {
+        std::cerr << "Error: The filename for import is empty." << std::endl;
+        //me->addError(SOP_MESSAGE, "Error: The filename for import is empty.");
+        me->addError(SOP_ERR_FILEGEO, "Error: The filename for import is empty.");
+        LOG_DEBUG(true, "Error is " << me->error() << " and UT_ERROR_ABORT is " << UT_ERROR_ABORT);
+        return me->error();
+    }
+    LOG_DEBUG(me->debug, "The filename for import is " << me->filename);
+
+    std::string suffix = ".3mf";
+    if (me->filename.length() < suffix.length() || (me->filename.rfind(suffix) != me->filename.length() - suffix.length())) {
+        me->filename += suffix;
+    }
+
+    // Unpack the 3mf archive
+    if (unzipArchive(me->filename, me->extractFolder) != ErrorCode::SUCCESS) {
+        std::cerr << "Error: Failed to unzip 3mf archive." << std::endl;
+        me->addError(SOP_MESSAGE, "Error: Failed to unzip the 3mf archive.");
+        return me->error();
+    }
+    LOG_DEBUG(false, "Finished unzipping archive.");
+
+    // Get the name of the model file.
+    std::string rels_path;
+    try {
+        rels_path = (std::filesystem::path(me->extractFolder) / "_rels/.rels").string();
+    } catch (const std::exception& e) {
+        std::cerr << "Error: Path construction failed for the .rels file in the 3mf archive." << std::endl;
+        me->addError(SOP_MESSAGE, "Error: Path construction failed for the .rels file in the 3mf archive.");
+        return me->error();
+    }
+    LOG_DEBUG(me->debug, "The rels path is " << rels_path);
+
+    std::string model_file;
+    if (me->getModelFile(rels_path, model_file) != ErrorCode::SUCCESS) {
+        std::cerr << "Error: No usable model file name in the 3mf archive." << std::endl;
+        me->addError(SOP_MESSAGE, "Error: No usable model file name in the 3mf archive.");
+        return me->error();
+    }
+
+    std::filesystem::path the_model_path = std::filesystem::path(me->extractFolder) / model_file;
+    std::string theModel = the_model_path.string();
+    LOG_DEBUG(me->debug, "We have the model file including path as " << theModel);
+
+    if (me->parseModelForSubnet(theModel) != ErrorCode::SUCCESS) {
+        std::cerr << "Unable to parse the 3mf model file for subnet information." << std::endl;
+        me->addError(SOP_MESSAGE, "Unable to parse the 3mf model file.");
+        return me->error();
+    }
+    me->theModel = theModel;
 
     // XXXXXXXX
-    LOG_DEBUG(this_node->debug, "geoOnly is " << this_node->geoOnly);
-    if (!this_node->geoOnly) {
-        // The first time through we need to create the machinery to use the textures.
-        // We put all of this inside a untility subnet.
-        // We create the subnet with name from our node name, which will make it
-        // unique if another 3mf reader node has also been instantiated.
-        // After creating the utility subnet, we put down a matnet in it.
-        // The we put down a shader inside the matnet and set the path and other parameters.
-
-        // Get the absolute path of the current SOP
-        UT_String ourFullPath; // Full path to our node
-        this_node->getFullPath(ourFullPath);
-        LOG_DEBUG(this_node->debug, "    Full path to our node is " << ourFullPath);
-        UT_String parentPath, ourName;
-        ourFullPath.splitPath(parentPath, ourName); // Split fullPath into parent path and our node name
-
-        // Tidy up the concatenation using std::string. It seems .buffer() is the HDK way to get the const char*
-        std::string ourNameStr(ourName.buffer());
-        std::string parentPathStr(parentPath.buffer());
-
-        // Since our node must have a unique name, this ensures the subnet does too
-        std::string subnetNameStr = ourNameStr + "_subnet";
-        LOG_DEBUG(this_node->debug, "    Unique name for subnet node: " << subnetNameStr);
-
-        // Ensure the path doesn't end up with double slashes if parent is "/"
-        std::string fullSubnetPathStr;
-        if (parentPathStr == "/") {
-            fullSubnetPathStr = "/" + subnetNameStr;
-        } else {
-            fullSubnetPathStr = parentPathStr + "/" + subnetNameStr;
-        }
-
-        // Assign back to UT_String members -- subnetPath is just for debugging really
-        this_node->subnetPath = fullSubnetPathStr.c_str();
-
-        LOG_DEBUG(this_node->debug, "    Parent: " << parentPath);
-        LOG_DEBUG(this_node->debug, "    Subnet Path: " << this_node->subnetPath);
-        LOG_DEBUG(false, "    utility subnet path is " << this_node->subnetPath);
-
-        std::string script;
-        script += "import hou\n";
-
-        // Find or create the parent and subnet
-        script += "parent = hou.node('" + parentPathStr + "')\n";
-        script += "subnet = parent.node('" + subnetNameStr + "') or parent.createNode('subnet', '" + subnetNameStr + "')\n";
-
-        // Find or create the material network
-        script += "matnet = subnet.node('3mf_materials') or subnet.createNode('matnet', '3mf_materials')\n";
-
-        script += "if matnet:\n";
-        // Find or Create the shader
-        script += "    shader = matnet.node('master_3mf_shader') or matnet.createNode('principledshader', 'master_3mf_shader')\n";
-        script += "    \n";
-        // Set parameters for the material texture override
-        script += "    shader.setParms({\n";
-        script += "        'basecolor_useTexture': 1,\n"; // Enables the texture slot
-        script += "        'basecolorr': 1.0,\n";        // White base color (1.0 multiplier)
-        script += "        'basecolorg': 1.0,\n";
-        script += "        'basecolorb': 1.0\n";
-        script += "    })\n";
-        script += "    \n";
-        // Visual polish and a note for the user
-        script += "    shader.setColor(hou.Color((0.0, 0.4, 0.4)))\n"; // Teal node color
-        script += "    shader.setComment('3MF Master Shader: Driven by material_override attribute.')\n";
-        script += "    shader.setGenericFlag(hou.nodeFlag.DisplayComment, True)\n";
-        script += "    \n";
-        // Organization and viewport nudge -- does that matter? XXX
-        script += "    matnet.layoutChildren()\n";
-        script += "    hou.hscript('glcache -m 5000')\n";
-
-        // Execute the final script
-        PYrunPythonStatements(script.c_str());
-
-        this_node->shaderNode = fullSubnetPathStr + "/3mf_materials/master_3mf_shader";
-        // Find the node
-        OP_Node* shaderNode = OPgetDirector()->findNode(this_node->shaderNode);
-        if (!shaderNode) {
-            // This is the only way I can figure out to show there was an error in the callback itself.
-            PYrunPythonStatements("import hou\nhou.ui.displayMessage('Failed to create shader node for potential textures.', severity=hou.severityType.Error)");
-        }
-        LOG_DEBUG(this_node->debug, "    Set shaderNode path to " << this_node->shaderNode);
+    /*
+    LOG_DEBUG(me->debug, "geoOnly is " << me->geoOnly);
+    if (!me->geoOnly || !me->hasTexture) {
+        me->matnetSetup(me);
     }
     // XXXXXXXXX
-    // Now read in the 3mf file and create the geometry
-    this_node->loadGeometry = true; // So cookMySop knows to read the 3mf file
-    this_node->forceRecook(); // Cause node to cook again
-    LOG_DEBUG(this_node->debug, "Load geometry is " << this_node->loadGeometry);
-    LOG_DEBUG(this_node->debug, "Our gdp is currently null? " << !this_node->gdp);
+    */
 
-    LOG_DEBUG(this_node->debug, "Exiting read");
+    // Now read in the 3mf file and create the geometry
+    me->loadGeometry = true; // So cookMySop knows to read the 3mf file
+    me->forceRecook(); // Cause node to cook again
+    LOG_DEBUG(me->debug, "Load geometry is " << me->loadGeometry);
+    LOG_DEBUG(me->debug, "Our gdp is currently null? " << !me->gdp);
+    LOG_DEBUG(me->debug, "In read() geoOnly is " << me->geoOnly);
+
+    LOG_DEBUG(me->debug, "Exiting read");
     return 1;
 }
 
@@ -1296,6 +1504,116 @@ SOP_Read3mf::getModelFile(std::string rels_path, std::string& model_file) {
 // Parse the 3mf model to build the Houdini geometry.
 //
 SOP_Read3mf::ErrorCode
+SOP_Read3mf::parseModelForSubnet(std::string the_model) {
+
+    LOG_DEBUG(this->debug, "Entering parseModelForSubnet");
+    try {
+        // Load and Parse the XML
+        XMLDocument model_doc;
+        XMLError result = model_doc.LoadFile(the_model.c_str());
+        if (result != XML_SUCCESS) {
+            std::cerr << "Error: Couldn't parse 3mf XML model file: " << model_doc.ErrorIDToName(result) << std::endl;
+            return ErrorCode::XML_FAILURE;
+        }
+
+        XMLElement* root = model_doc.RootElement();
+        if (!root) {
+             std::cerr << "Error: 3mf model file in XML file has no root element." << std::endl;
+             return ErrorCode::XML_FAILURE;
+        }
+        
+        // Root Element Tag
+        std::string root_tag = root->Name(); 
+        LOG_DEBUG(false, "Root Element Tag: " << root_tag);
+
+        LOG_DEBUG(this->debug, "Upon entry we have geoOnly: " << this->geoOnly << " hasColor: " << this->hasColor << " hasTexture: "
+            << this->hasTexture << " hasMulti: " << this->hasMulti);
+
+        // XXXXXX
+        // Check first if we need to handle color, textures, multi-properties, etc. as we progress
+        if (!this->geoOnly) {
+            DecorFeatureVisitor visitor;
+            model_doc.Accept(&visitor);
+
+            if (visitor.hasColorGroups) {
+                this->hasColor = true;
+                LOG_DEBUG(this->debug, "Model has colors");
+            }
+            if (visitor.hasTextureGroups) {
+                this->hasTexture = true;
+                LOG_DEBUG(this->debug, "Model has textures");
+            }
+            if (visitor.hasBaseMaterials) {
+                this->hasBase = true;
+                LOG_DEBUG(this->debug, "Model has basematerials");
+            }
+            if (visitor.hasMultiProperties) {
+                this->hasMulti = true;
+                LOG_DEBUG(this->debug, "Model has multi-properties");
+            }
+            if (visitor.hasCompositeMaterials) {
+                this->hasComp = true;
+                LOG_DEBUG(this->debug, "Model has compositeMaterials");
+            }
+        }
+        LOG_DEBUG(this->debug, "After setting we have geoOnly: " << this->geoOnly << " hasColor: " << this->hasColor << " hasTexture: "
+            << this->hasTexture << " hasMulti: " << this->hasMulti);
+
+        // XXXXXX
+        // If it works to do this here, then I can get rid of the parameter -- only only there in case I
+        // have to keep it in the read routine.
+        if (!this->geoOnly && (this->hasTexture || this->hasMulti)) {
+            LOG_DEBUG(this->debug, "We have geoOnly false with texture and/or multi-properties");
+            this->matnetSetup(); // Get as far as creating the matnet
+        }
+        LOG_DEBUG(this->debug, "Now we have geoOnly: " << this->geoOnly << " hasColor: " << this->hasColor << " hasTexture: "
+            << this->hasTexture << " hasMulti: " << this->hasMulti);
+        if (!this->geoOnly && this->hasTexture) {
+            // XXXX
+            LOG_DEBUG(this->debug, "We have texture, so also create the override shader node");
+            this->matnetOverrideSetup();
+        }
+        LOG_DEBUG(this->debug, "After checking we have geoOnly: " << this->geoOnly << " hasColor: " << this->hasColor << " hasTexture: "
+            << this->hasTexture << " hasMulti: " << this->hasMulti);
+   
+        for (XMLElement* descendant = root->FirstChildElement();
+             descendant != nullptr;
+             descendant = descendant->NextSiblingElement()) {
+            
+            std::string tag_name = descendant->Name(); 
+            LOG_DEBUG(false, "We got tagname " << tag_name);
+            
+            if (tag_name == "resources") {
+                if (this->handleResourcesForSubnet(descendant) != ErrorCode::SUCCESS) {
+                    std::cerr << "Error: Failed to handle resources section of the 3mf file." << std::endl;
+                    return ErrorCode::BAD_3MF;
+                }
+                break; // Should be only get one resources per model file. We flag an on on this in the geometry pass 
+            }
+        }       
+    } catch (...) {
+        std::cerr << "Error: An unknown, unexpected error occurred." << std::endl;
+        return ErrorCode::BAD_3MF;
+    }
+
+    // XXXXXXX
+    if (!this->geoOnly) {
+        printMap(texture2dgroupDict, "texture2dgroupDict", this->debug);
+        printMap(multiDict, "multiDict", this->debug);
+        printMap(shaderDict, "shaderDict", this->debug);
+        printMap(textureFilesDict, "textureFilesDict", this->debug);
+    }
+    // XXXXXX
+
+    LOG_DEBUG(this->debug, "Exiting parseModelForSubnet");
+    return ErrorCode::SUCCESS;
+}
+
+
+//
+// Parse the 3mf model to build the Houdini geometry.
+//
+SOP_Read3mf::ErrorCode
 SOP_Read3mf::parseModel(std::string the_model) {
 
     LOG_DEBUG(this->debug, "Entering parseModel");
@@ -1344,6 +1662,11 @@ SOP_Read3mf::parseModel(std::string the_model) {
                 }
             }
         }
+
+        LOG_DEBUG(this->debug, "Upon entry we have geoOnly: " << this->geoOnly << " hasColor: " << this->hasColor << " hasTexture: "
+            << this->hasTexture << " hasMulti: " << this->hasMulti);
+
+        // XXXXXX
 
         // Parse Top-Level Child Nodes
         int num_resources = 0;
@@ -1404,7 +1727,7 @@ SOP_Read3mf::parseModel(std::string the_model) {
             std::cerr << "Error: Object ID " << buildID << " has no geometry." << std::endl;
             continue;
         }
-        LOG_DEBUG(this->debug, "    Going through buildList we have object " << buildID);
+        LOG_DEBUG(this->debug, "Going through buildList we have object " << buildID);
 
         const GU_Detail* sourceGdp = ito->second->objGdpHandle.gdp();
         if (!sourceGdp) {
@@ -1423,12 +1746,7 @@ SOP_Read3mf::parseModel(std::string the_model) {
 
                 GA_Range newPoints(this->gdp->getPointMap(), startIdx, endIdx);
 
-                this->gdp->transform(
-                    finalMat, 
-                    GA_Range(), 
-                    newPoints,   
-                    false        
-                );
+                this->gdp->transform(finalMat, GA_Range(), newPoints, false);
             }
         }
     }
@@ -1437,13 +1755,15 @@ SOP_Read3mf::parseModel(std::string the_model) {
     printMap(vertexDict, "vertexDict", this->debug);
     printObjectMap(objectDict, "objectDict", this->debug);
     // XXXXXXX
+    /*
     if (!this->geoOnly) {
         printMap(texture2dgroupDict, "texture2dgroupDict", this->debug);
+        printMap(multiDict, "multiDict", this->debug);
         printMap(shaderDict, "shaderDict", this->debug);
         printMap(textureFilesDict, "textureFilesDict", this->debug);
     }
     // XXXXXX
-
+    */
     LOG_DEBUG(this->debug, "Exiting parseModel");
     return ErrorCode::SUCCESS;
 }
@@ -1453,9 +1773,9 @@ SOP_Read3mf::parseModel(std::string the_model) {
 // Parse the resources part of the tree and set up Houdini data structures.
 //
 SOP_Read3mf::ErrorCode
-SOP_Read3mf::handleResources(XMLElement* element) {
+SOP_Read3mf::handleResourcesForSubnet(XMLElement* element) {
 
-    LOG_DEBUG(this->debug, "Entering handleResources");
+    LOG_DEBUG(this->debug, "Entering handleResourcesForSubnet");
     ErrorCode err = ErrorCode::SUCCESS;
 
     // Get the first child element of 'element'
@@ -1464,7 +1784,7 @@ SOP_Read3mf::handleResources(XMLElement* element) {
         const char* tag_name_cstr = descendant->Name(); // plain tag name
         std::string tag_name(tag_name_cstr ? tag_name_cstr : ""); // Safely get tag name
         if (tag_name == "object") {
-            err = handleObject(descendant);
+            //err = handleObject(descendant); // Now doing this in handleResources()
         } else if (!this->geoOnly) { // XXXXXXX
             if (tag_name == "m:colorgroup") {
                 err = handleColorgroup(descendant);
@@ -1484,6 +1804,35 @@ SOP_Read3mf::handleResources(XMLElement* element) {
             }
         } // XXXXX I think it's okay if we don't do an else here when we're only doing geometry
 
+        if (err != ErrorCode::SUCCESS) {
+            return err;
+        }
+        descendant = descendant->NextSiblingElement();
+    }
+
+    LOG_DEBUG(this->debug, "Exiting handleResourcesForSubnet");
+
+    return ErrorCode::SUCCESS;
+}
+
+
+//
+// Parse the resources part of the tree and set up Houdini data structures.
+//
+SOP_Read3mf::ErrorCode
+SOP_Read3mf::handleResources(XMLElement* element) {
+
+    LOG_DEBUG(this->debug, "Entering handleResources");
+    ErrorCode err = ErrorCode::SUCCESS;
+
+    // Get the first child element of 'element'
+    tinyxml2::XMLElement* descendant = element->FirstChildElement();
+    while (descendant != nullptr) {
+        const char* tag_name_cstr = descendant->Name(); // plain tag name
+        std::string tag_name(tag_name_cstr ? tag_name_cstr : ""); // Safely get tag name
+        if (tag_name == "object") {
+            err = handleObject(descendant);        
+        } 
         if (err != ErrorCode::SUCCESS) {
             return err;
         }
@@ -1524,7 +1873,7 @@ SOP_Read3mf::handleColorgroup(XMLElement* element) {
         descendant != nullptr; 
         descendant = descendant->NextSiblingElement()) {
         
-        LOG_DEBUG(false, "    testing element");
+        LOG_DEBUG(false, "testing element");
 
         if (strcmp(descendant->Name(), "m:color") == 0) {
             std::string color;
@@ -1577,7 +1926,7 @@ SOP_Read3mf::handleBasematerials(XMLElement* element) {
         descendant != nullptr; 
         descendant = descendant->NextSiblingElement()) {
         
-        LOG_DEBUG(false, "    testing element");
+        LOG_DEBUG(false, "testing element");
 
         if (strcmp(descendant->Name(), "base") == 0) {
             std::string color;
@@ -1772,7 +2121,7 @@ SOP_Read3mf::ErrorCode
 SOP_Read3mf::handleTiling(int id, std::string path, Tiling tilestyleU, Tiling tilestyleV, std::string& usePath) {
 
     LOG_DEBUG(this->debug, "Entering handleTiling");
-    LOG_DEBUG(false, "    We came in with path of " << path);
+    LOG_DEBUG(false, "We came in with path of " << path);
 
     std::string dir;
     std::string stem;
@@ -1822,19 +2171,17 @@ SOP_Read3mf::handleTiling(int id, std::string path, Tiling tilestyleU, Tiling ti
         success = textureWrapMirror(originalData, width, height, numChannels, dir, stem, suffix, usePath, this->debug);
         textureModifyUVsDict[id] = {1.0f, 0.5f, tilestyleU, tilestyleV};
     } else if (tilestyleU == Tiling::MIRROR && tilestyleV == Tiling::NONE) {
-        LOG_DEBUG(this->debug, "    FOO in U");
         // Just a simple mirror in U and we wait to do the streaking for NONE until later
         success = textureMirrorWrap(originalData, width, height, numChannels, dir, stem, suffix, usePath, this->debug);
         textureModifyUVsDict[id] = {0.5f, 1.0f, tilestyleU, tilestyleV};
-    } else if (tilestyleV == Tiling::MIRROR && tilestyleU == Tiling::NONE) {
-        LOG_DEBUG(this->debug, "    FOO in V");
+    } else if (tilestyleU == Tiling::NONE && tilestyleV == Tiling::MIRROR) {
         // Just a simple mirror in V and we wait to do the streaking for NONE until later
         success = textureWrapMirror(originalData, width, height, numChannels, dir, stem, suffix, usePath, this->debug);
         textureModifyUVsDict[id] = {1.0f, 0.5f, tilestyleU, tilestyleV};
     }
     // Note that we do not deal with clamp/none tiling here, since we need to know the max and min uv coordinates
     // before we can do that. That happens in handleTexture2dgroup() instead.
-    LOG_DEBUG(false, "    Coming back from tiling, usePath is now " + usePath);
+    LOG_DEBUG(false, "Coming back from tiling, usePath is now " + usePath);
 
     stbi_image_free(originalData);
     LOG_DEBUG(this->debug, "Exiting handleTiling with success of " + std::to_string(success));
@@ -1877,8 +2224,8 @@ SOP_Read3mf::handleTexture2dgroup(tinyxml2::XMLElement* element) {
         return ErrorCode::BAD_3MF;
     }
     std::string textureFile = itf->second;
-    LOG_DEBUG(false, "    Got textureFile from dict of " + textureFile);
-    LOG_DEBUG(false, "    Got texid " + std::to_string(texid) + " and id " + std::to_string(id));
+    LOG_DEBUG(false, "Got textureFile from dict of " + textureFile);
+    LOG_DEBUG(false, "Got texid " + std::to_string(texid) + " and id " + std::to_string(id));
 
     // Get the info about tiling for this texture
     auto ituv = textureModifyUVsDict.find(texid);
@@ -1893,7 +2240,7 @@ SOP_Read3mf::handleTexture2dgroup(tinyxml2::XMLElement* element) {
     LOG_DEBUG(false, "We have scaling of " << scaling[0] << ", " << scaling[1]);
 
     //texturePid2IdDict[id] = texid; // id here is pid on triangles
-    //LOG_DEBUG(this->debug, "    Set texturePid2IdDict of id " << id << " to texid " << texid);
+    //LOG_DEBUG(this->debug, "Set texturePid2IdDict of id " << id << " to texid " << texid);
 
     // In case we need to transform coordinates after a clampTexture()
     using FP_Type = float;
@@ -1917,13 +2264,13 @@ SOP_Read3mf::handleTexture2dgroup(tinyxml2::XMLElement* element) {
         minV = std::min(minV, v);
     }
 
-    LOG_DEBUG(false, "    maxU " << maxU << " maxV " << maxV << " minU " << minU << " minV " << minV);
+    LOG_DEBUG(false, "maxU " << maxU << " maxV " << maxV << " minU " << minU << " minV " << minV);
 
     std::vector<std::array<float, 2>> arrayOfCoords;
     arrayOfCoords.reserve(coordCount); // Do this all at once to avoid repeated allocations & memory fragmenting
-    LOG_DEBUG(false, "    Reserved " << coordCount << " items of memory in arrayOfCoords");
+    LOG_DEBUG(false, "Reserved " << coordCount << " items of memory in arrayOfCoords");
     texture2dgroupDict[id].texturePath = textureFile; // The original file -- but it might get overwritten by clamping
-    LOG_DEBUG(false, "    set texture2dgroupDict of id " << id << " to " << textureFile);
+    LOG_DEBUG(false, "set texture2dgroupDict of id " << id << " to " << textureFile);
     texture2dgroupDict[id].originalTexId = texid;
 
     if (tilestyleU == Tiling::NONE || tilestyleV == Tiling::NONE || tilestyleU == Tiling::CLAMP || tilestyleV == Tiling::CLAMP) {
@@ -1935,13 +2282,13 @@ SOP_Read3mf::handleTexture2dgroup(tinyxml2::XMLElement* element) {
             return ErrorCode::OTHER;
         }
         texture2dgroupDict[id].texturePath = textureFile; // overwrite with name of new texture file from clamping
-        LOG_DEBUG(false, "    Returned from clamp and set texture2dgroupDict of  id " << id << " to " << textureFile);
+        LOG_DEBUG(false, "Returned from clamp and set texture2dgroupDict of  id " << id << " to " << textureFile);
     }
 
        // The scaling might have changed after call to clampTexture, so we redo uv coordinates
     choice = textureModifyUVsDict[texid];
     scaling = choice.scaling;
-    LOG_DEBUG(false, "    We now have revised transform info " << choice.scaling[0] << ", "
+    LOG_DEBUG(false, "We now have revised transform info " << choice.scaling[0] << ", "
         << choice.scaling[1] << " for texid " << texid);
 
     // iterate through all siblings of the first child
@@ -1955,8 +2302,8 @@ SOP_Read3mf::handleTexture2dgroup(tinyxml2::XMLElement* element) {
                     std::cerr << "Error: Unable to get uv coordinate information." << std::endl;
                     return ErrorCode::BAD_3MF;
             }
-            LOG_DEBUG(false, "    we're going to modify using scale " << scaling[0] << " " << scaling[1]);
-            LOG_DEBUG(false, "    starting with u " << u << " and v " << v);
+            LOG_DEBUG(false, "we're going to modify using scale " << scaling[0] << " " << scaling[1]);
+            LOG_DEBUG(false, "starting with u " << u << " and v " << v);
             // Modify uvs based on transform info
             if (tilestyleU == Tiling::NONE) {
                 u = (u - minU) * scaling[0];
@@ -1968,10 +2315,10 @@ SOP_Read3mf::handleTexture2dgroup(tinyxml2::XMLElement* element) {
             } else {
                 v = v * scaling[1];
             }
-            LOG_DEBUG(false, "    and now we have u " << u << " and v " << v);
+            LOG_DEBUG(false, "and now we have u " << u << " and v " << v);
 
             arrayOfCoords.push_back({u, v});
-            LOG_DEBUG(false, "    Did push");
+            LOG_DEBUG(false, "Did push");
         }
     }
 
@@ -1995,8 +2342,8 @@ SOP_Read3mf::clampTexture(const int texid, const int groupId, std::string textur
     float minU, float minV, std::string& usePath) {                
 
     LOG_DEBUG(this->debug, "Entering clampTexture.");
-    LOG_DEBUG(false, "    Came in with maxU " << maxU << " maxV " << maxV);
-    LOG_DEBUG(false, "    Came in with minU " << minU << " minV " << minV);
+    LOG_DEBUG(false, "Came in with maxU " << maxU << " maxV " << maxV);
+    LOG_DEBUG(false, "Came in with minU " << minU << " minV " << minV);
 
     std::string dir;
     std::string stem;
@@ -2009,7 +2356,7 @@ SOP_Read3mf::clampTexture(const int texid, const int groupId, std::string textur
 
     // load texture as it is currently
     unsigned char* originalData = stbi_load(texturePathFs.c_str(), &width, &height, &numChannels, 0);
-    LOG_DEBUG(false, "    From original data we have width " << width << " and height " << height << " numChannels "
+    LOG_DEBUG(false, "From original data we have width " << width << " and height " << height << " numChannels "
         << numChannels);
 
     if (!originalData) {
@@ -2036,8 +2383,8 @@ SOP_Read3mf::clampTexture(const int texid, const int groupId, std::string textur
     minU *= currentScaling[0];
     maxV *= currentScaling[1];
     minV *= currentScaling[1];
-    LOG_DEBUG(false, "    We've reset maxU " << maxU << " maxV " << maxV);
-    LOG_DEBUG(false, "    We've reset minU " << minU << " minV " << minV);
+    LOG_DEBUG(false, "We've reset maxU " << maxU << " maxV " << maxV);
+    LOG_DEBUG(false, "We've reset minU " << minU << " minV " << minV);
 
     if (maxU > 1 && redoU) {
         extendRight = ceil(width * (maxU - 1.0));
@@ -2051,8 +2398,8 @@ SOP_Read3mf::clampTexture(const int texid, const int groupId, std::string textur
     if (minV < 0 && redoV) {
         extendDown = ceil(height * (0.0 - minV)); // Because V is flipped
     }
-    LOG_DEBUG(false, "    We have maxU " << maxU << " minU " << minU << " maxV " << maxV << " minV " << minV);
-    LOG_DEBUG(false, "    We have extendLeft " << extendLeft << " extendRight " << extendRight << " extendDown "
+    LOG_DEBUG(false, "We have maxU " << maxU << " minU " << minU << " maxV " << maxV << " minV " << minV);
+    LOG_DEBUG(false, "We have extendLeft " << extendLeft << " extendRight " << extendRight << " extendDown "
         << extendDown << " extendUp " <<  extendUp);
 
     int success;
@@ -2067,7 +2414,7 @@ SOP_Read3mf::clampTexture(const int texid, const int groupId, std::string textur
         std::vector<unsigned char> newData(finalWidth * finalHeight * numChannels);
         unsigned char* newImagePtr = newData.data();
 
-        LOG_DEBUG(false, "    We have finalWidth " << finalWidth << " and finalHeight " << finalHeight
+        LOG_DEBUG(false, "We have finalWidth " << finalWidth << " and finalHeight " << finalHeight
             << " and finalRowStride " << finalRowStride << " and numChannels " << numChannels);
         // Pixel data for the left-most or right-most single column pixel
         unsigned char edgePixelData[pixelBytes];
@@ -2128,7 +2475,7 @@ SOP_Read3mf::clampTexture(const int texid, const int groupId, std::string textur
         int finalWidth = width + extendLeft + extendRight;
         int finalHeight = height;
         int finalRowStride = finalWidth * pixelBytes;
-        LOG_DEBUG(false, "    We have width " << width << " and finalWidth " << finalWidth);
+        LOG_DEBUG(false, "We have width " << width << " and finalWidth " << finalWidth);
 
         std::vector<unsigned char> newData(finalWidth * finalHeight * numChannels);
         unsigned char* newImagePtr = newData.data();
@@ -2148,15 +2495,15 @@ SOP_Read3mf::clampTexture(const int texid, const int groupId, std::string textur
             // Now streak it on the left
             for (int x = 0; x < extendLeft; ++x) {
                 if (y < 10 && x < 10) {
-                    LOG_DEBUG(false, "    We're streaking left by " << pixelBytes);
+                    LOG_DEBUG(false, "We're streaking left by " << pixelBytes);
                 }
                 std::memcpy(newRow + x * pixelBytes, edgePixelData, pixelBytes);
             }
 
             // Now copy the original image row
             if (y < 10) {
-                LOG_DEBUG(false, "    We're copying original row to " << extendLeft * pixelBytes);
-                LOG_DEBUG(false, "    It is " << originalRowStride << " long.");
+                LOG_DEBUG(false, "We're copying original row to " << extendLeft * pixelBytes);
+                LOG_DEBUG(false, "It is " << originalRowStride << " long.");
             }
             std::memcpy(newRow + extendLeft * pixelBytes, originalRow, originalRowStride);
 
@@ -2166,7 +2513,7 @@ SOP_Read3mf::clampTexture(const int texid, const int groupId, std::string textur
             std::memcpy(edgePixelData, edgePixelPtr, pixelBytes);
             for (int x = 0; x < extendRight; ++x) {
                 if (y < 10 && x < 10) {
-                    LOG_DEBUG(false, "    We're streaking right at " << (extendLeft * pixelBytes) + originalRowStride + x * pixelBytes
+                    LOG_DEBUG(false, "We're streaking right at " << (extendLeft * pixelBytes) + originalRowStride + x * pixelBytes
                         << " by " << pixelBytes);
                 }
                 std::memcpy(newRow + (extendLeft * pixelBytes) + originalRowStride + x * pixelBytes, edgePixelData, pixelBytes);
@@ -2176,7 +2523,7 @@ SOP_Read3mf::clampTexture(const int texid, const int groupId, std::string textur
         success = writeNewTexture(dir, stem, suffix, "-clampedU" + std::to_string(groupId), finalWidth, finalHeight, numChannels,
             newImagePtr, finalRowStride, usePath, this->debug);
         textureModifyUVsDict[texid].scaling = {1/(maxU-minU), currentScaling[1]}; // leave tiling style entries alone
-        LOG_DEBUG(false, "    we have scaling now of " << 1/maxU << " " << 1.0 << " for texid " << texid);
+        LOG_DEBUG(false, "we have scaling now of " << 1/maxU << " " << 1.0 << " for texid " << texid);
 
     // For clamping in the V direction, we only have to worry about streaking in the up or down directions.
     // This is easier than in U, since while we're in a streak section, the whole row is a streak and not
@@ -2185,7 +2532,7 @@ SOP_Read3mf::clampTexture(const int texid, const int groupId, std::string textur
         int finalHeight = height + extendUp + extendDown;
         int finalWidth = width;
         int finalRowStride = finalWidth * pixelBytes;
-        LOG_DEBUG(false, "    We have height " << height << " and finalHeight " << finalHeight);
+        LOG_DEBUG(false, "We have height " << height << " and finalHeight " << finalHeight);
 
         std::vector<unsigned char> newData(finalWidth * finalHeight * numChannels);
         unsigned char* newImagePtr = newData.data();
@@ -2213,7 +2560,7 @@ SOP_Read3mf::clampTexture(const int texid, const int groupId, std::string textur
         success = writeNewTexture(dir, stem, suffix, "-clampedV" + std::to_string(groupId), finalWidth, finalHeight, numChannels,
             newImagePtr, finalRowStride, usePath, this->debug);
         textureModifyUVsDict[texid].scaling = {currentScaling[0], 1/(maxV-minV)}; // leave tiling style entries alone
-        LOG_DEBUG(false, "    we have scaling now of " << 1.0 << " " << 1/maxV << " for texid " << texid);
+        LOG_DEBUG(false, "we have scaling now of " << 1.0 << " " << 1/maxV << " for texid " << texid);
     }
 
     // Free the original image memory
@@ -2270,13 +2617,188 @@ SOP_Read3mf::handleMultiproperties(XMLElement* element) {
 
     LOG_DEBUG(this->debug, "Entering handleMultiproperties");
 
-    std::cerr << "Error: We do not yet handle multi-properties." << std::endl;
+    //std::cerr << "Error: We do not yet handle multi-properties." << std::endl;
+
+    const char* id_cstr = element->Attribute("id");
+    if (id_cstr == nullptr) {
+        std::cerr << "Error: A multiproperties has no id." << std::endl;
+        return ErrorCode::BAD_3MF;
+    }
+    const int id = std::stoi(id_cstr);
+
+    LOG_DEBUG(this->debug, "stop 1");
+
+    // XXXX Should I check if this id has been used for a different multiproperts? Or for some other resource?
+    // Should I do that for all the types of them?! Probably.
+    const char* pids_cstr = element->Attribute("pids");
+    if (pids_cstr == nullptr) {
+        std::cerr << "Error: A multiproperties has no list of layer ids." << std::endl;
+        return ErrorCode::BAD_3MF;
+    }
+
+    LOG_DEBUG(this->debug, "stop 2");
+
+    // Get the list of layer ids
+    std::vector<int> layersList;
+    while (pids_cstr && *pids_cstr) {
+        char* next;
+        long val = std::strtol(pids_cstr, &next, 10); // Base 10
+        
+        // If next == pids_cstr, we didn't find a number
+        if (pids_cstr == next) {
+            break;
+        }
+        
+        layersList.push_back(static_cast<int>(val));
+
+        pids_cstr = next; // Move the pointer to the start of the next number
+    }
+
+    LOG_DEBUG(this->debug, "stop 3");
+
+    if (layersList.size() < 1) {
+        std::cerr << "Error: We have multiproperties but the list of them is size 0" << std::endl;
+        return ErrorCode::BAD_3MF;
+    }
+
+    LOG_DEBUG(this->debug, "stop 4");
+
+    // Cycle through the layers list creating shaders. For colorgroup ids we'll fill in the basecolor on the
+    // shader later. For texture2dgroup ids we'll set the basecolor to white and use a texture path.
+    // The matnet node we already created is the parent of these shaders.
+    OP_Node* matnetNode = OPgetDirector()->findNode(this->matnetPath);
+    if (!matnetNode) {
+        std::cerr << "Error: Cannot find matnet node we already made." << std::endl;
+        return ErrorCode::OTHER;
+    }
+    bool first = true;
+    std::vector<UT_String> shaderList;
+    LOG_DEBUG(this->debug, "There are " << layersList.size() << " layers.");
+    shaderList.reserve(layersList.size());
+    for (size_t i = 0; i < layersList.size(); ++i) {
+        LOG_DEBUG(this->debug, "Cycle " << i);
+        int layer = layersList[i];
+        LOG_DEBUG(this->debug, "The layer has id " << layer);
+        auto itc = colorDict.find(layer);
+        LOG_DEBUG(this->debug, "Tested color");
+        auto itb = basematDict.find(layer);
+        LOG_DEBUG(this->debug, "Tested base.");
+        auto itt = texture2dgroupDict.find(layer);
+        LOG_DEBUG(this->debug, "Tested texture");
+        OP_Node* shaderNode = ((OP_Network*) matnetNode)->createNode("principledshader");
+        if (!shaderNode) {
+            std::cerr << "Error: Unable to create shader node." << std::endl;
+            return ErrorCode::OTHER;
+        }
+        LOG_DEBUG(this->debug, "Made a shader node");
+        UT_String fullShaderPath;
+        fullShaderPath = shaderNode->getFullPath(fullShaderPath);
+        LOG_DEBUG(this->debug, "Got shader path " << fullShaderPath);
+        shaderList[i] = fullShaderPath;
+        if (itc != colorDict.end() || itb != basematDict.end()) {
+            LOG_DEBUG(this->debug, "Layer " << layer << " is a color or base material");
+        }
+    }
+    LOG_DEBUG(this->debug, "stop 5");
+            
+
+
+
+    /*
+            this->shaderNode = this->matnetPath;
+            this->shaderNode += "/master_3mf_shader";
+            // Find the node
+            OP_Node* shaderNode = OPgetDirector()->findNode(this->shaderNode);
+            if (!shaderNode) {
+                // This is the only way I can figure out to show there was an error in the callback itself.
+                PYrunPythonStatements("import hou\nhou.ui.displayMessage('Failed to create shader node for potential textures.', severity=hou.severityType.Error)");
+            }
+            LOG_DEBUG(this->debug, "Set shaderNode path to " << this->shaderNode);
+
+            XXX Get correct colors
+            std::vector<std::string> colorArray = itc->second;
+            // Need pindex to index into color list. XXXXXX Yuck -- I don't know this yet?!
+            std::string color = itc->second[pindex];
+            LOG_DEBUG(this->debug, "We got color " << color << " in colorDict");
+            shaderNode->setFloat("basecolor", 0, this->t, 1.0f);    // set red to 1.0
+            shaderNode->setFloat("basecolor", 1, this->t, 1.0f);    // set green to 1.0
+            shaderNode->setFloat("basecolor", 2, this->t, 1.0f);    // set blue to 1.0
+
+
+
+    if (!shaderNode) {
+        std::cerr << "Error: Could not create utility shader node for textures." << std::endl;
+        return ErrorCode::OTHER;
+    }
+            // create a color shader for new shader
+        } else if (itt != texture2dgroupDict.end()) {
+            LOG_DEBUG(this->debug, "Layer " << layer << " is a texture");
+            // create a texture shader for new shader
+        } else {
+            std::cerr << "We've encountered a multi-property layer that isn't a color, basecolor, or texture.";
+            return ErrorCode::BAD_3MF;
+        }
+        if (!first) {
+            // hook up previous shader to new shader
+        }
+        // previous shader = new shader
+        first = false;
+    }
+    */
+
+    LOG_DEBUG(this->debug, "stop 6");
+
+    multiDict[id].id = id;
+    multiDict[id].multiPids = layersList;
+    multiDict[id].multiShaders = shaderList;
+    LOG_DEBUG(this->debug, "For multiproperties group " << id);
+    for (int resourceID : layersList) {
+        LOG_DEBUG(this->debug, "    ID " << resourceID);
+    }
+    LOG_DEBUG(this->debug, "stop 7");
+    // --------
+    // Now handle each of the multi elements
+    tinyxml2::XMLElement* descendant = element->FirstChildElement();
+    // XXX Should I insist it have at least one multi? Two? Check spec.
+    while (descendant != nullptr) {
+        const char* tag_name_cstr = descendant->Name(); // plain tag name
+        std::string tag_name(tag_name_cstr ? tag_name_cstr : ""); // Safely get tag name
+        LOG_DEBUG(false, std::string("     Got tagname ") + tag_name);
+        if (tag_name == "m:multi") {
+            const char* pindices_cstr = descendant->Attribute("pindices");
+            if (pindices_cstr == nullptr) {
+                std::cerr << "Error: A multiproperties has no list of pindices." << std::endl;
+                return ErrorCode::BAD_3MF;
+            }
+            // Get the list of indices for this multi element
+            std::vector<int> pindicesList;
+            while (pindices_cstr && *pindices_cstr) {
+                char* next;
+                long val = std::strtol(pindices_cstr, &next, 10); // Base 10
+                
+                // If next == pindices_cstr, we didn't find a number
+                if (pindices_cstr == next) {
+                    break;
+                }
+                pindicesList.push_back(static_cast<int>(val));
+                pindices_cstr = next; // Move the pointer to the start of the next number
+            }
+            multiDict[id].multiPindices.push_back(std::move(pindicesList));
+        } else {
+            std::cerr << "We found a non-multi tag " << tag_name << " in the multiproperties section of the object." << std::endl;
+            return ErrorCode::BAD_3MF;
+        }
+        descendant = descendant->NextSiblingElement();
+    }
+
+
+    // --------
+    printMap(multiDict, "multiDict", this->debug);
 
     LOG_DEBUG(this->debug, "Exiting handleMultiproperties");
 
     return ErrorCode::OTHER;
 }
-
 
 //
 // Parse the build entry for the tree to see what objects should be present as
@@ -2315,7 +2837,7 @@ SOP_Read3mf::handleBuild(XMLElement* element) {
                 transform.identity();
             } else {
                 // Convert transform string to transform
-                LOG_DEBUG(false, "    Got new transform string " << transform_cstr);
+                LOG_DEBUG(false, "Got new transform string " << transform_cstr);
                 bool success;
                 success = parseTransformString(transform_cstr, transform);
                 if (!success) {
@@ -2324,7 +2846,7 @@ SOP_Read3mf::handleBuild(XMLElement* element) {
                 }
             }
             buildDict[objectID].push_back(transform);
-            LOG_DEBUG(false, "    Just inserted a transform for objectID " << objectID);
+            LOG_DEBUG(false, "Just inserted a transform for objectID " << objectID);
 
             // Currently we ignore the following. Not sure if this is important for Houdini's purposes. XXX
             const char* partnumber_cstr = descendant->Attribute("partnumber");
@@ -2372,23 +2894,23 @@ SOP_Read3mf::handleObject(XMLElement* element) {
         std::cerr << "Error: Object ID is not a valid integer." << std::endl;
         return ErrorCode::BAD_3MF;
     }
-    LOG_DEBUG(this->debug, "    for objectID " << id);
+    LOG_DEBUG(this->debug, "for objectID " << id);
 
     if (objectDict.count(id) == 0) {
         ObjectData* data = new ObjectData(); // This is our only "new" of this object. We do the clean-up in clearData().
         data->id = id;
         objectDict[id] = data; // Store the ptr not the whole thing in case of resizing of the dictionary
-        LOG_DEBUG(this->debug, "    Created objectID entry for object " << id);
+        LOG_DEBUG(this->debug, "Created objectID entry for object " << id);
 
         if (!this->build) { // We're not using build instructions so all objects go into the buildDict
             UT_Matrix4 transform;
             transform.identity();
             buildDict[id].push_back(transform);
-            LOG_DEBUG(false, "    Just inserted a transform for objectID " << id);
+            LOG_DEBUG(false, "Just inserted a transform for objectID " << id);
         }
-        LOG_DEBUG(false, "    This is a new object to us: " << id);
+        LOG_DEBUG(false, "This is a new object to us: " << id);
     } else {
-        LOG_DEBUG(false, "    We've seen this object before: " << id);
+        LOG_DEBUG(false, "We've seen this object before: " << id);
     }
 
     // Get the type
@@ -2464,7 +2986,7 @@ SOP_Read3mf::handleObject(XMLElement* element) {
         auto itc = colorDict.find(pid);
         auto itb = basematDict.find(pid);
         auto itt = texture2dgroupDict.find(pid);
-        auto itm = multiPids.find(pid);
+        auto itm = multiDict.find(pid);
 
         if (itc != colorDict.end()) {
             std::vector<std::string> colorArray = itc->second;
@@ -2505,7 +3027,7 @@ SOP_Read3mf::handleObject(XMLElement* element) {
             defaultColor = convertColorToHexString(color, this->debug);
             LOG_DEBUG(false, "Converted default color to hex string: " << defaultColor);
 
-        } else if (itm != multiPids.end()) {
+        } else if (itm != multiDict.end()) {
             std::cerr << "We do not yet handle multi-properties." << std::endl;
             return ErrorCode::OTHER;
         }
@@ -2524,7 +3046,7 @@ SOP_Read3mf::handleObject(XMLElement* element) {
         
         if (tag_name == "mesh") {
             if (objectDict[id]->objGdpHandle.isValid()) {
-                LOG_DEBUG(false, "    We've already built object id " << id);
+                LOG_DEBUG(false, "We've already built object id " << id);
                 descendant = descendant->NextSiblingElement();
                 continue;
             }
@@ -2533,7 +3055,7 @@ SOP_Read3mf::handleObject(XMLElement* element) {
             objectDict[id]->objGdpHandle.allocateAndSet(new_gdp, true);
             GU_Detail* objGdp = objectDict[id]->objGdpHandle.gdpNC();
 
-            LOG_DEBUG(false, "    Added objGdp for object id " << id);
+            LOG_DEBUG(false, "Added objGdp for object id " << id);
             
             int numVertices = 0;
             int numTriangles = 0;
@@ -2552,7 +3074,7 @@ SOP_Read3mf::handleObject(XMLElement* element) {
                 objectDict[id]->objGdpHandle.allocateAndSet(new_gdp, true);
                 GU_Detail* objGdp = objectDict[id]->objGdpHandle.gdpNC();
 
-                LOG_DEBUG(false, "    Added objGdp for object id " << id);
+                LOG_DEBUG(false, "Added objGdp for object id " << id);
             }
             if (handleComponents(descendant, id) != ErrorCode::SUCCESS) {
                 std::cerr << "Error: Could not parse components of an object." << std::endl;
@@ -2581,7 +3103,7 @@ SOP_Read3mf::handleMesh(XMLElement* element, int& numVertices, int& numTriangles
     while (descendant != nullptr) {
         const char* tag_name_cstr = descendant->Name(); // plain tag name
         std::string tag_name(tag_name_cstr ? tag_name_cstr : ""); // Safely get tag name
-        LOG_DEBUG(false, "     Got tagname " << tag_name);
+        LOG_DEBUG(false, "Got tagname " << tag_name);
         if (tag_name == "vertices") {
             if (handleVertices(descendant, numVertices, objID) != ErrorCode::SUCCESS) {
                 std::cerr << "Error: Unable to handle a vertex for object ID " << objID << "." << std::endl;
@@ -2669,10 +3191,10 @@ SOP_Read3mf::handleComponent(XMLElement* element, int parentID) {
         std::cerr << "Error: Failed to convert an object id to an integer." << std::endl;
         return ErrorCode::BAD_3MF;
     }
-    LOG_DEBUG(false, "    We got component object id " << id);
+    LOG_DEBUG(false, "We got component object id " << id);
     const char *xform_cstr = element->Attribute("transform");
     if (xform_cstr == nullptr) {
-        LOG_DEBUG(false, "    with no xform");
+        LOG_DEBUG(false, "with no xform");
     }
 
     // Merge object with id into parentID's gdp applying the transform we found
@@ -2745,7 +3267,7 @@ SOP_Read3mf::handleComponent(XMLElement* element, int parentID) {
         false                   // Argument 4: just_P (false means transform vectors too)
     );
 
-    LOG_DEBUG(false, "    Merge gdp from object " << id << " into parent of id " << parentID);
+    LOG_DEBUG(false, "Merge gdp from object " << id << " into parent of id " << parentID);
 
     LOG_DEBUG(this->debug, "Exiting handleComponent");
 
@@ -2823,7 +3345,7 @@ SOP_Read3mf::handleTriangles(XMLElement* element, int& numTriangles, const int o
         return ErrorCode::OTHER;
     }
     GU_Detail* objGdp = ito->second->objGdpHandle.gdpNC(); // non-const since we'll be changing it
-    LOG_DEBUG(this->debug, "    We currently have " << objGdp->getNumPoints() << " points, "
+    LOG_DEBUG(this->debug, "We currently have " << objGdp->getNumPoints() << " points, "
         << objGdp->getNumVertices() << " vertices, and " << objGdp->getNumPrimitives() << " prims");
 
 
@@ -2854,50 +3376,53 @@ SOP_Read3mf::handleTriangles(XMLElement* element, int& numTriangles, const int o
     GA_RWHandleS override_h;
 
     if (!this->geoOnly) {
-        Cd_h = GA_RWHandleV3(objGdp->addFloatTuple(GA_ATTRIB_VERTEX, "Cd", 3, GA_Defaults(1.0)));
-        Cd_h->setTypeInfo(GA_TYPE_COLOR);
-        if (!Cd_h.isValid()) {
-            addError(SOP_MESSAGE, "Color attribute handle is invalid after its creation.");
-            std::cerr << "Error: Color attribute handle is invalid after its creation for object " << objID << std::endl;
-            return ErrorCode::OTHER;
+        if (this->hasColor || this->hasTexture || this->hasBase || this->hasMulti || this->hasComp) { // XXXXX
+            Cd_h = GA_RWHandleV3(objGdp->addFloatTuple(GA_ATTRIB_VERTEX, "Cd", 3, GA_Defaults(1.0)));
+            Cd_h->setTypeInfo(GA_TYPE_COLOR);
+            if (!Cd_h.isValid()) {
+                addError(SOP_MESSAGE, "Color attribute handle is invalid after its creation.");
+                std::cerr << "Error: Color attribute handle is invalid after its creation for object " << objID << std::endl;
+                return ErrorCode::OTHER;
+            }
         }
 
-        // I should be able to use GEO_STD_ATTRIB_TEXTURE in place of "uv", but it seems I can't
+        if (this->hasTexture || this->hasMulti) { // XXXXXX
+            // I should be able to use GEO_STD_ATTRIB_TEXTURE in place of "uv", but it seems I can't
+            UV_h = GA_RWHandleV3(objGdp->addFloatTuple(GA_ATTRIB_VERTEX, "uv", 3, GA_Defaults(0.0)));
+            if (!UV_h.isValid()) {
+                addError(SOP_MESSAGE, "UV attribute handle is invalid after its creation.");
+                std::cerr << "Error: UV attribute handle is invalid for object " << objID << " after its creation." << std::endl;
+                return ErrorCode::OTHER;
+            }
+            UV_h->setTypeInfo(GA_TYPE_TEXTURE_COORD);
 
-        UV_h = GA_RWHandleV3(objGdp->addFloatTuple(GA_ATTRIB_VERTEX, "uv", 3, GA_Defaults(0.0)));
-        if (!UV_h.isValid()) {
-            addError(SOP_MESSAGE, "UV attribute handle is invalid after its creation.");
-            std::cerr << "Error: UV attribute handle is invalid for object " << objID << " after its creation." << std::endl;
-            return ErrorCode::OTHER;
-        }
-        UV_h->setTypeInfo(GA_TYPE_TEXTURE_COORD);
+            // I should be able to use GEO_STD_ATTRIB_MATERIAL in place of "shop_materialpath", but it seems I can't
+            //GA_RWHandleS material_h = GA_RWHandleS(objGdp->addStringTuple(GA_ATTRIB_PRIMITIVE, "shop_materialpath", 1));
+            material_h = GA_RWHandleS(objGdp->addStringTuple(GA_ATTRIB_PRIMITIVE, "shop_materialpath", 1));
+            if (!material_h.isValid()) {
+                addError(SOP_MESSAGE, "material path attribute handle is invalid after its creation.");
+                std::cerr << "Error: material path attribute handle is invalid for object " << objID << " after its creation." << std::endl;
+                return ErrorCode::OTHER;
+            }
 
-        // I should be able to use GEO_STD_ATTRIB_MATERIAL in place of "shop_materialpath", but it seems I can't
-        //GA_RWHandleS material_h = GA_RWHandleS(objGdp->addStringTuple(GA_ATTRIB_PRIMITIVE, "shop_materialpath", 1));
-        material_h = GA_RWHandleS(objGdp->addStringTuple(GA_ATTRIB_PRIMITIVE, "shop_materialpath", 1));
-        if (!material_h.isValid()) {
-            addError(SOP_MESSAGE, "material path attribute handle is invalid after its creation.");
-            std::cerr << "Error: material path attribute handle is invalid for object " << objID << " after its creation." << std::endl;
-            return ErrorCode::OTHER;
-        }
-
-        // XXX For strings Houdini has to do a lookup to see if the string already exists so it can use the right index
-        // for the string in the attribute. So maybe I should do this once for all the primitives in the new range
-        // once I leave handleTriangle() XXX
-        // Create an attribute to store the specific texture path for each primitive
-        override_h = GA_RWHandleS(objGdp->addStringTuple(GA_ATTRIB_PRIMITIVE, "material_override", 1));
-        if (!override_h.isValid()) {
-            addError(SOP_MESSAGE, "override attribute handle is invalid after its creation.");
-            std::cerr << "Error: override attribute handle is invalid for object " << objID << " after its creation." << std::endl;
-            return ErrorCode::OTHER;
-        }
+            // XXX For strings Houdini has to do a lookup to see if the string already exists so it can use the right index
+            // for the string in the attribute. So maybe I should do this once for all the primitives in the new range
+            // once I leave handleTriangle() XXX
+            // Create an attribute to store the specific texture path for each primitive
+            override_h = GA_RWHandleS(objGdp->addStringTuple(GA_ATTRIB_PRIMITIVE, "material_override", 1));
+            if (!override_h.isValid()) {
+                addError(SOP_MESSAGE, "override attribute handle is invalid after its creation.");
+                std::cerr << "Error: override attribute handle is invalid for object " << objID << " after its creation." << std::endl;
+                return ErrorCode::OTHER;
+            }
+        } // XXXXX
     }
     // XXXXXXXX
 
     UT_Map<PointKey, GA_Offset> localPointDict;
 
     tinyxml2::XMLElement* descendant = element->FirstChildElement();
-    LOG_DEBUG(false, "    got next descendent element");
+    LOG_DEBUG(false, "got next descendent element");
     while (descendant != nullptr) {
         const char* tag_name_cstr = descendant->Name(); // plain tag name
         std::string tag_name(tag_name_cstr ? tag_name_cstr : ""); // Safely get tag name
@@ -2923,7 +3448,7 @@ SOP_Read3mf::handleTriangles(XMLElement* element, int& numTriangles, const int o
     }
     */
 
-    LOG_DEBUG(this->debug, "    We now have " << objGdp->getNumPoints() << " points, "
+    LOG_DEBUG(this->debug, "We now have " << objGdp->getNumPoints() << " points, "
         << objGdp->getNumVertices() << " vertices, and " << objGdp->getNumPrimitives() << " prims");
 
     LOG_DEBUG(this->debug, "Exiting handleTriangles");
@@ -2953,8 +3478,8 @@ SOP_Read3mf::handleTriangle(XMLElement* element, int& numTriangles, const int ob
     LOG_DEBUG(false, "Entering handleTriangle");
 
     UT_String defaultColor = this->objectDict[objID]->defaultColor;
-    LOG_DEBUG(false, "    Got default color of " << defaultColor << " from object " << objID);
-    LOG_DEBUG(false, "    We currently have " << objGdp->getNumPoints() << " points, "
+    LOG_DEBUG(false, "Got default color of " << defaultColor << " from object " << objID);
+    LOG_DEBUG(false, "We currently have " << objGdp->getNumPoints() << " points, "
         << objGdp->getNumVertices() << " vertices, and " << objGdp->getNumPrimitives() << " prims");
 
 
@@ -3014,7 +3539,7 @@ SOP_Read3mf::handleTriangle(XMLElement* element, int& numTriangles, const int ob
         // Safe Assignment: We now know indices 0, 1, and 2 exist
         posList[i].assign(vert_coords[0], vert_coords[1], vert_coords[2]);
 
-        LOG_DEBUG(false, "    Vertex " + std::to_string(i) + " (ID:" + std::to_string(verts[i]) + 
+        LOG_DEBUG(false, "Vertex " + std::to_string(i) + " (ID:" + std::to_string(verts[i]) + 
                               ") pos: " + std::to_string(vert_coords[0]) + ", " + 
                               std::to_string(vert_coords[1]) + ", " + 
                               std::to_string(vert_coords[2]));
@@ -3024,32 +3549,32 @@ SOP_Read3mf::handleTriangle(XMLElement* element, int& numTriangles, const int ob
     // since we'd otherwise get a coincident point for every vertex at this point. If there's
     // no point yet in that position for this object, create one.
     PointKey lookupKey;
-    LOG_DEBUG(false, "    Detail currently has " + std::to_string(objGdp->getNumVertices()) + " vertices.");
+    LOG_DEBUG(false, "Detail currently has " + std::to_string(objGdp->getNumVertices()) + " vertices.");
     // Manually append vertices and wire them to points
     GA_Offset p_offsets[3];
     for (exint i = 0; i < 3; i++) { // cycle through vertices
         lookupKey.pos = posList[i];
-        LOG_DEBUG(false, "    Got " + std::to_string(i) + "th lookup pos of {" + std::to_string(lookupKey.pos[0])
+        LOG_DEBUG(false, "Got " + std::to_string(i) + "th lookup pos of {" + std::to_string(lookupKey.pos[0])
             + ", " + std::to_string(lookupKey.pos[1]) + ", " + std::to_string(lookupKey.pos[2]) + "}");
-        LOG_DEBUG(false, "    Got " + std::to_string(i) + "th lookup objID");
+        LOG_DEBUG(false, "Got " + std::to_string(i) + "th lookup objID");
         auto itp = pointDict.find(lookupKey);
         if (itp != pointDict.end()) { // We already have this point
             p_offsets[i] = itp->second;
             LOG_DEBUG(false, std::string("    We already have point ") + std::to_string(p_offsets[i]));
         } else { // We haven't seen this point yet in this copy of the object
-            LOG_DEBUG(false, "    No itp entry or we haven't seen this point before in this copy of the object");
+            LOG_DEBUG(false, "No itp entry or we haven't seen this point before in this copy of the object");
             // New point. Add it to the dictionary and set the vertex to it and set its position.
             p_offsets[i] = objGdp->appendPoint();
-            LOG_DEBUG(false, "    Got p_offset " + std::to_string(p_offsets[i]) + " for new point.");
+            LOG_DEBUG(false, "Got p_offset " + std::to_string(p_offsets[i]) + " for new point.");
             objGdp->setPos3(p_offsets[i], posList[i]);
             LOG_DEBUG(false, "    Set the position of the point to " << posList[i] << " for position " << i);
             pointDict[lookupKey] = p_offsets[i];
-            LOG_DEBUG(false, "    added offset " + std::to_string(p_offsets[i]) + " to pointDict.");
+            LOG_DEBUG(false, "added offset " + std::to_string(p_offsets[i]) + " to pointDict.");
         }
         //poly->appendVertex(p_offset);
         //poly->setPointOffset(i, p_offset);
 
-        LOG_DEBUG(false, "    Added vertex.");
+        LOG_DEBUG(false, "Added vertex.");
     }
 
     // Create the polygon
@@ -3073,13 +3598,13 @@ SOP_Read3mf::handleTriangle(XMLElement* element, int& numTriangles, const int ob
         }
     }
     */
-    LOG_DEBUG(false, "    After bulding poly, we have " << objGdp->getNumPoints() << " points, "
+    LOG_DEBUG(false, "After bulding poly, we have " << objGdp->getNumPoints() << " points, "
         << objGdp->getNumVertices() << " vertices, and " << objGdp->getNumPrimitives() << " prims");
     obj_h.set(primOff, objID);
-    LOG_DEBUG(false, "    Got " + std::to_string(primOff) + " for the prim offset.");
+    LOG_DEBUG(false, "Got " + std::to_string(primOff) + " for the prim offset.");
 
     // XXXXXX
-    if (this->geoOnly) {
+    if (this->geoOnly || (!this->hasColor && !this->hasTexture && !this->hasBase && !this->hasMulti && !this->hasComp)) {
         return ErrorCode::SUCCESS;
     }
     // XXXXXXX
@@ -3107,20 +3632,20 @@ SOP_Read3mf::handleTriangle(XMLElement* element, int& numTriangles, const int ob
     if (result_pid != tinyxml2::XML_SUCCESS) {
         // A groupID just overrides the object default color's groupID, so when missing a pid, use that.
         groupID = objectDict[objID]->defaultColorGroup;
-        LOG_DEBUG(false, "    No id for color or texture group so using default");
+        LOG_DEBUG(false, "No id for color or texture group so using default");
     } else {  
         groupID = pid;
-        LOG_DEBUG(false, "    Triangle has pid on it, use that: " + std::to_string(pid));
+        LOG_DEBUG(false, "Triangle has pid on it, use that: " + std::to_string(pid));
     }
-    LOG_DEBUG(false, std::string("    We have pid ") + std::to_string(pid));
-    LOG_DEBUG(false, std::string("    We have groupID ") + std::to_string(groupID));
+    LOG_DEBUG(false, std::string("We have pid ") + std::to_string(pid));
+    LOG_DEBUG(false, std::string("We have groupID ") + std::to_string(groupID));
 
     // What kind of color/texture does this triangle have, if any?
 
     auto itc = this->colorDict.find(groupID);
     auto itb = this->basematDict.find(groupID);
     auto itt = this->texture2dgroupDict.find(groupID);
-    auto itm = this->multiPids.find(groupID);
+    auto itm = this->multiDict.find(groupID);
     if (itt != this->texture2dgroupDict.end()) { // Pick which texture2dgroup to use for the triangle
         coordArray = itt->second.coords;
         if (!coordArray.size()) {
@@ -3128,10 +3653,10 @@ SOP_Read3mf::handleTriangle(XMLElement* element, int& numTriangles, const int ob
             return ErrorCode::OTHER;
         }
         for (int i = 0; i < coordArray.size(); ++i) {
-            LOG_DEBUG(false, "        Coordarray of " + std::to_string(i) + " is " + std::to_string(coordArray[i][0])
+            LOG_DEBUG(false, "Coordarray of " + std::to_string(i) + " is " + std::to_string(coordArray[i][0])
                 + ", " + std::to_string(coordArray[i][1]));
         }
-        LOG_DEBUG(false, "    We got texture");
+        LOG_DEBUG(false, "We got texture");
         useTexture = true;
     } else if (itc != colorDict.end()) {
         colorArray = itc->second;
@@ -3139,8 +3664,8 @@ SOP_Read3mf::handleTriangle(XMLElement* element, int& numTriangles, const int ob
     } else if (itb != basematDict.end()) {
         basematArray = itb->second;
         LOG_DEBUG(false, std::string("We got basemat "));
-    } else if (itm != multiPids.end()) {
-        multiArray = itm->second;
+    } else if (itm != multiDict.end()) {
+        multiArray = itm->second.multiPids;;
         LOG_DEBUG(false, std::string("We got multi "));
         useMulti = true;
     } else if (groupID != -1) { // We were reset by something, but it's not something we recognize
@@ -3153,7 +3678,7 @@ SOP_Read3mf::handleTriangle(XMLElement* element, int& numTriangles, const int ob
         // Force us to use color on the triangle.
         useTexture = false;
         useMulti = false;
-        LOG_DEBUG(false, "    Setting texture and multi to false, since we're using default object color");
+        LOG_DEBUG(false, "Setting texture and multi to false, since we're using default object color");
     }
 
     // Grab / set the pindices that provide info for each vertex of the triangle
@@ -3177,14 +3702,14 @@ SOP_Read3mf::handleTriangle(XMLElement* element, int& numTriangles, const int ob
     if (p1 == -1 && p2 == -1 && p3 == -1) { // We have to use the object default color
         useTexture = false;
         useMulti = false;
-        LOG_DEBUG(false, "    Setting texture and multi to false so we'll use color");
+        LOG_DEBUG(false, "Setting texture and multi to false so we'll use color");
     }
 
     //
     // Using color
     //
     if (!useTexture && !useMulti) { // We're using color
-        LOG_DEBUG(false, "    We are doing color");
+        LOG_DEBUG(false, "We are doing color");
         
         // The pindices choose a color for this point
         // lambda function to avoid writing this 3 times for 3 vertices
@@ -3192,26 +3717,26 @@ SOP_Read3mf::handleTriangle(XMLElement* element, int& numTriangles, const int ob
             std::string color;
             if (groupID == -1 || basemat_p == -1) {
                 color = defaultColor;
-                LOG_DEBUG(false, "    groupID and basemat -1 so assigning default color");
+                LOG_DEBUG(false, "groupID and basemat -1 so assigning default color");
             } else if (itb != basematDict.end()) {  // Check for base mat color
                 const std::vector<std::string>& basematArray = itb->second;
                 if (basematArray.size() < (size_t) basemat_p + 1) {
                     color = defaultColor;
-                    LOG_DEBUG(false, "    basemat default");
+                    LOG_DEBUG(false, "basemat default");
                 } else {
                     color = basematArray[basemat_p];
-                    LOG_DEBUG(false, "    basemat");
+                    LOG_DEBUG(false, "basemat");
                 }
 
             } else {
                 color = colorArray[basemat_p];
-                LOG_DEBUG(false, "    from basemat");
+                LOG_DEBUG(false, "from basemat");
             }
             float alpha;
             UT_Vector3 aColor = convertHexStringToUTVector3(color, alpha, false);
             GA_Offset global_vtx_off = poly->getVertexOffset(local_vtx_idx);
             Cd_h.set(global_vtx_off, aColor);
-            LOG_DEBUG(false, "    Set vertex color to " + color);
+            LOG_DEBUG(false, "Set vertex color to " + color);
         };
         if (this->flip) { // Where to flip what is a little puzzling. I appears we need to do so again.
             assign_vertex_color(0, p3);
@@ -3222,7 +3747,7 @@ SOP_Read3mf::handleTriangle(XMLElement* element, int& numTriangles, const int ob
             assign_vertex_color(1, p2);
             assign_vertex_color(2, p3);
         }
-        LOG_DEBUG(false, "    We now have " << objGdp->getNumPoints() << " points, "
+        LOG_DEBUG(false, "We now have " << objGdp->getNumPoints() << " points, "
             << objGdp->getNumVertices() << " vertices, and " << objGdp->getNumPrimitives() << " prims");
 
 
@@ -3242,7 +3767,7 @@ SOP_Read3mf::handleTriangle(XMLElement* element, int& numTriangles, const int ob
     //
     // From here on it's regular textures.
     //
-    LOG_DEBUG(false, std::string("    Entering texture section we have p1 ") + std::to_string(p1) + std::string(", p2 ")
+    LOG_DEBUG(false, std::string("Entering texture section we have p1 ") + std::to_string(p1) + std::string(", p2 ")
         + std::to_string(p2) + std::string(", p3 ") + std::to_string(p3) + std::string(" and default color ")
         + std::string(defaultColor));
 
@@ -3287,7 +3812,7 @@ SOP_Read3mf::handleTriangle(XMLElement* element, int& numTriangles, const int ob
     coords[1] = uv1[1];
     coords[2] = 0.0;
     GA_Offset global_vtx_off = poly->getVertexOffset(0);
-    LOG_DEBUG(false, "    For vertex 0 with offset " << global_vtx_off << " we have coords " << coords);
+    LOG_DEBUG(false, "For vertex 0 with offset " << global_vtx_off << " we have coords " << coords);
     UV_h.set(global_vtx_off, coords);
 
     vertex = verts[1];
@@ -3295,7 +3820,7 @@ SOP_Read3mf::handleTriangle(XMLElement* element, int& numTriangles, const int ob
     coords[1] = uv2[1];
     coords[2] = 0.0;
     global_vtx_off = poly->getVertexOffset(1);
-    LOG_DEBUG(false, "    For vertex 1 with offset " << global_vtx_off << " we have coords " << coords);
+    LOG_DEBUG(false, "For vertex 1 with offset " << global_vtx_off << " we have coords " << coords);
     UV_h.set(global_vtx_off, coords);
 
     vertex = verts[2];
@@ -3303,28 +3828,28 @@ SOP_Read3mf::handleTriangle(XMLElement* element, int& numTriangles, const int ob
     coords[1] = uv3[1];
     coords[2] = 0.0;
     global_vtx_off = poly->getVertexOffset(2);
-    LOG_DEBUG(false, "    For vertex 2 with offset " << global_vtx_off << " we have coords " << coords);
+    LOG_DEBUG(false, "For vertex 2 with offset " << global_vtx_off << " we have coords " << coords);
     UV_h.set(global_vtx_off, coords);
 
-    if (material_h.isValid() && this->shaderNode.length() > 0) {
-        material_h.set(primOff, this->shaderNode);
-        LOG_DEBUG(false, "    Setting materialpath to " << this->shaderNode);
+    if (material_h.isValid() && this->shaderPath.length() > 0) {
+        material_h.set(primOff, this->shaderPath);
+        LOG_DEBUG(false, "Setting materialpath to " << this->shaderPath);
     }
 
-    LOG_DEBUG(false, "    Before texturegroup thing.");
+    LOG_DEBUG(false, "Before texturegroup thing.");
     auto ittp = texture2dgroupDict.find(groupID);
     if (ittp != texture2dgroupDict.end()) {
         UT_String path = ittp->second.texturePath;
-        LOG_DEBUG(false, "    Got texturePath " << path);
+        LOG_DEBUG(false, "Got texturePath " << path);
         std::string jsonStr = "{\"basecolor_useTexture\":1, \"basecolor_texture\":\"" + std::string(path.buffer()) + "\"}";
         override_h.set(primOff, jsonStr.c_str());
-        LOG_DEBUG(false, "    Back from set");
+        LOG_DEBUG(false, "Back from set");
     } else {
         std::cerr << "Error: No texture available for primitive -- it should already have been set." << std::endl;
         return ErrorCode::OTHER;
     }
 
-    LOG_DEBUG(false, "    We now have " << objGdp->getNumPoints() << " points, "
+    LOG_DEBUG(false, "We now have " << objGdp->getNumPoints() << " points, "
         << objGdp->getNumVertices() << " vertices, and " << objGdp->getNumPrimitives() << " prims");
 
     LOG_DEBUG(false, "Exiting handleTriangle");

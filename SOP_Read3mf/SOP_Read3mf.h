@@ -69,6 +69,47 @@ do { \
 
 namespace HDK_Sample {
 
+    // Information for each group of multi-properties
+    struct MultiData {
+        int id; // resource group id
+        std::vector<int> multiPids; // list of resource ids for colorgroups, texture2dgroups, etc. for the different layers
+        std::vector<std::vector<int>> multiPindices; // pindices into each layer group
+        //std::vector<UT_String> multiShaders; // list of shader node paths one per layer
+        std::vector<UT_String> multiShaders; // list of shader nodes one per layer
+    };
+
+    // Overload of operator << so I can print maps with MultiData in them
+    inline std::ostream& operator<<(std::ostream& os, const HDK_Sample::MultiData& data) {
+        os << "ID: " << data.id;
+
+        // Print multiPids
+        os << ", Pids: [";
+        for (size_t i = 0; i < data.multiPids.size(); ++i) {
+            os << data.multiPids[i] << (i == data.multiPids.size() - 1 ? "" : ", ");
+        }
+        os << "]";
+
+        // Print multiPindices (Vector of Vectors)
+        os << ", Pindices: [";
+        for (size_t i = 0; i < data.multiPindices.size(); ++i) {
+            os << "(";
+            for (size_t j = 0; j < data.multiPindices[i].size(); ++j) {
+                os << data.multiPindices[i][j] << (j == data.multiPindices[i].size() - 1 ? "" : " ");
+            }
+            os << ")" << (i == data.multiPindices.size() - 1 ? "" : ", ");
+        }
+        os << "]";
+
+        // Print multiShaders (UT_String needs .buffer() or .toStdString())
+        os << ", Shaders: [";
+        for (size_t i = 0; i < data.multiShaders.size(); ++i) {
+            os << data.multiShaders[i].buffer() << (i == data.multiShaders.size() - 1 ? "" : ", ");
+        }
+        os << "]";
+        
+        return os;
+    }
+
     // Information for each object in objectDict
     struct ObjectData {
         int id;
@@ -227,11 +268,16 @@ namespace HDK_Sample {
         // Set true in read so when cookMySop is forced to run it knows it needs to read in the 3mf file
         std::atomic<bool>   loadGeometry;   // Initialized to false in the class constructor's initialization list
 
-        // Node path for utility subnet -- currently unused except for debugging
+        // Node path for utility subnet. Currently it's a full path, but I should change it to be relative to the parent
+        // node in case the user moves the sop. XXXX
         UT_String       subnetPath;
 
         // The path to the node to use for our textures
-        UT_String       shaderNode;
+        UT_String       shaderPath;
+
+        // The path to the matnet for our multiproperties. For the same reason as for the subnetPath, I should change
+        // this to be relative to the parent node. XXXXX
+        UT_String       matnetPath;
 
         // Timestamp for the beginning  of the read operation.
         std::chrono::time_point<std::chrono::high_resolution_clock>   start;
@@ -244,6 +290,16 @@ namespace HDK_Sample {
 
         // Folder into which we unzip the 3mf contents
         std::string     extractFolder;
+
+        // Name of the model file. This will need to be expanded if there's more than one. XXX
+        std::string     theModel;
+
+        // XXXXX Flags to show which kinds of resources the model uses
+        bool            hasColor = false;       // Colorgroup found
+        bool            hasTexture = false;     // Texture2dgroup found
+        bool            hasBase = false;        // Base material found
+        bool            hasMulti = false;       // Multi-properties found
+        bool            hasComp = false;        // Composite material found
 
         // key: object id, value: the object's default color and a GU_Detail for the object
         UT_Map<int, ObjectData*>                 objectDict;
@@ -261,7 +317,12 @@ namespace HDK_Sample {
         std::unordered_map<int, std::string>                shaderDict;
 
         // key: id for multiproperties, value: list of texture2dgroup/colorgroup ids
-        std::unordered_map<int, std::vector<int>>           multiPids;
+        //std::unordered_map<int, std::vector<int>>           multiPids;
+
+        // key: id for mutliproperties, value: MultiData (includes layer ids, layer pindices, and shader paths)
+        std::unordered_map<int, MultiData> multiDict;
+
+        // key: id for multiproperties, value: 
 
         // key: vertex ("point" in Houdini) number, value: array of (x,y,z) coordinates
         std::map<int, std::vector<float>>                   vertexDict;
@@ -275,10 +336,14 @@ namespace HDK_Sample {
         // key: object id if it's listed in the build feature, value: a list of transforms for the object
         UT_Map<int, std::vector<UT_Matrix4>>     buildDict;
 
+        void                        matnetOverrideSetup();
+        void                        matnetSetup();
         static int                  read(void *data, int index, fpreal t, const PRM_Template *tplate);
         // SOP_Read3mf::ErrorCode   read3mf_archive(const std::vector<SOP_Read3mf::FileEntry>& files_to_add);
         SOP_Read3mf::ErrorCode      getModelFile(std::string rels_path, std::string& model_file);
+        SOP_Read3mf::ErrorCode      parseModelForSubnet(std::string the_model);
         SOP_Read3mf::ErrorCode      parseModel(std::string the_model);
+        SOP_Read3mf::ErrorCode      handleResourcesForSubnet(tinyxml2::XMLElement* element);
         SOP_Read3mf::ErrorCode      handleResources(tinyxml2::XMLElement* element);
         SOP_Read3mf::ErrorCode      handleColorgroup(tinyxml2::XMLElement* element);
         SOP_Read3mf::ErrorCode      handleColor(tinyxml2::XMLElement* element, std::string& color);
