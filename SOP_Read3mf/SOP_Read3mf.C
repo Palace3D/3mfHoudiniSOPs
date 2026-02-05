@@ -35,6 +35,7 @@
 #include <OP/OP_AutoLockInputs.h>
 #include <OP/OP_OperatorTable.h>
 #include <OP/OP_Parameters.h>
+#include <OP/OP_Layout.h>
 #include <CH/CH_Manager.h>
 #include <PRM/PRM_Include.h>
 #include <UT/UT_DSOVersion.h>
@@ -1088,6 +1089,7 @@ SOP_Read3mf::matnetSetup() {
         return;
     }
     this->matnetPath = matnetPath;
+    this->matnetPath.harden();
     LOG_DEBUG(this->debug, "We got matnet from python of " << matnetPath);
 
 /*
@@ -1150,6 +1152,7 @@ SOP_Read3mf::matnetOverrideSetup() {
 
     this->shaderPath = this->matnetPath;
     this->shaderPath += "/master_3mf_shader";
+    this->shaderPath.harden();
     LOG_DEBUG(this->debug, "Created shader path of " << this->shaderPath.buffer());
     // Find the node
     OP_Node* shaderNode = OPgetDirector()->findNode(this->shaderPath);
@@ -1407,21 +1410,13 @@ SOP_Read3mf::read(void *data, int index, fpreal t, const PRM_Template *tplate) {
     std::string theModel = the_model_path.string();
     LOG_DEBUG(me->debug, "We have the model file including path as " << theModel);
 
+    // Any required subnet machinery is set up in this function
     if (me->parseModelForSubnet(theModel) != ErrorCode::SUCCESS) {
         std::cerr << "Unable to parse the 3mf model file for subnet information." << std::endl;
         me->addError(SOP_MESSAGE, "Unable to parse the 3mf model file.");
         return me->error();
     }
     me->theModel = theModel;
-
-    // XXXXXXXX
-    /*
-    LOG_DEBUG(me->debug, "geoOnly is " << me->geoOnly);
-    if (!me->geoOnly || !me->hasTexture) {
-        me->matnetSetup(me);
-    }
-    // XXXXXXXXX
-    */
 
     // Now read in the 3mf file and create the geometry
     me->loadGeometry = true; // So cookMySop knows to read the 3mf file
@@ -2270,6 +2265,7 @@ SOP_Read3mf::handleTexture2dgroup(tinyxml2::XMLElement* element) {
     arrayOfCoords.reserve(coordCount); // Do this all at once to avoid repeated allocations & memory fragmenting
     LOG_DEBUG(false, "Reserved " << coordCount << " items of memory in arrayOfCoords");
     texture2dgroupDict[id].texturePath = textureFile; // The original file -- but it might get overwritten by clamping
+    texture2dgroupDict[id].texturePath.harden();
     LOG_DEBUG(false, "set texture2dgroupDict of id " << id << " to " << textureFile);
     texture2dgroupDict[id].originalTexId = texid;
 
@@ -2282,6 +2278,7 @@ SOP_Read3mf::handleTexture2dgroup(tinyxml2::XMLElement* element) {
             return ErrorCode::OTHER;
         }
         texture2dgroupDict[id].texturePath = textureFile; // overwrite with name of new texture file from clamping
+        texture2dgroupDict[id].texturePath.harden();
         LOG_DEBUG(false, "Returned from clamp and set texture2dgroupDict of  id " << id << " to " << textureFile);
     }
 
@@ -2671,82 +2668,101 @@ SOP_Read3mf::handleMultiproperties(XMLElement* element) {
         std::cerr << "Error: Cannot find matnet node we already made." << std::endl;
         return ErrorCode::OTHER;
     }
+    OP_Node* previousNode;
     bool first = true;
-    std::vector<UT_String> shaderList;
+    std::vector<UT_StringHolder> shaderList;
     LOG_DEBUG(this->debug, "There are " << layersList.size() << " layers.");
     shaderList.reserve(layersList.size());
     for (size_t i = 0; i < layersList.size(); ++i) {
         LOG_DEBUG(this->debug, "Cycle " << i);
         int layer = layersList[i];
-        LOG_DEBUG(this->debug, "The layer has id " << layer);
         auto itc = colorDict.find(layer);
-        LOG_DEBUG(this->debug, "Tested color");
         auto itb = basematDict.find(layer);
-        LOG_DEBUG(this->debug, "Tested base.");
         auto itt = texture2dgroupDict.find(layer);
-        LOG_DEBUG(this->debug, "Tested texture");
-        OP_Node* shaderNode = ((OP_Network*) matnetNode)->createNode("principledshader");
+        UT_String shaderName;
+        shaderName .sprintf("shader_layer_%d", i);
+        OP_Node* shaderNode = ((OP_Network*) matnetNode)->createNode("principledshader", shaderName);
         if (!shaderNode) {
             std::cerr << "Error: Unable to create shader node." << std::endl;
             return ErrorCode::OTHER;
         }
         LOG_DEBUG(this->debug, "Made a shader node");
         UT_String fullShaderPath;
-        fullShaderPath = shaderNode->getFullPath(fullShaderPath);
+        shaderNode->getFullPath(fullShaderPath);
+        //fullShaderPath.harden(); // This didn't actually take care of the garbage memory problem, now using Holder instead
         LOG_DEBUG(this->debug, "Got shader path " << fullShaderPath);
-        shaderList[i] = fullShaderPath;
+        shaderList.push_back(UT_StringHolder(fullShaderPath));
         if (itc != colorDict.end() || itb != basematDict.end()) {
             LOG_DEBUG(this->debug, "Layer " << layer << " is a color or base material");
-        }
-    }
-    LOG_DEBUG(this->debug, "stop 5");
-            
-
-
-
-    /*
-            this->shaderNode = this->matnetPath;
-            this->shaderNode += "/master_3mf_shader";
-            // Find the node
-            OP_Node* shaderNode = OPgetDirector()->findNode(this->shaderNode);
-            if (!shaderNode) {
-                // This is the only way I can figure out to show there was an error in the callback itself.
-                PYrunPythonStatements("import hou\nhou.ui.displayMessage('Failed to create shader node for potential textures.', severity=hou.severityType.Error)");
-            }
-            LOG_DEBUG(this->debug, "Set shaderNode path to " << this->shaderNode);
-
-            XXX Get correct colors
-            std::vector<std::string> colorArray = itc->second;
-            // Need pindex to index into color list. XXXXXX Yuck -- I don't know this yet?!
-            std::string color = itc->second[pindex];
-            LOG_DEBUG(this->debug, "We got color " << color << " in colorDict");
-            shaderNode->setFloat("basecolor", 0, this->t, 1.0f);    // set red to 1.0
-            shaderNode->setFloat("basecolor", 1, this->t, 1.0f);    // set green to 1.0
-            shaderNode->setFloat("basecolor", 2, this->t, 1.0f);    // set blue to 1.0
-
-
-
-    if (!shaderNode) {
-        std::cerr << "Error: Could not create utility shader node for textures." << std::endl;
-        return ErrorCode::OTHER;
-    }
-            // create a color shader for new shader
         } else if (itt != texture2dgroupDict.end()) {
             LOG_DEBUG(this->debug, "Layer " << layer << " is a texture");
-            // create a texture shader for new shader
-        } else {
-            std::cerr << "We've encountered a multi-property layer that isn't a color, basecolor, or texture.";
-            return ErrorCode::BAD_3MF;
+            shaderNode->setFloat("basecolor", 0, 0.0, 1.0f);
+            shaderNode->setFloat("basecolor", 1, 0.0, 1.0f);
+            shaderNode->setFloat("basecolor", 2, 0.0, 1.0f);
+            shaderNode->setInt("basecolor_useTexture", 0, 0, 1);
+            LOG_DEBUG(this->debug, "About to set texture to texture2dgroup of " << layer <<
+                " which is " << this->texture2dgroupDict[layer].texturePath.buffer());
+            //shaderNode->setString("basecolor_texture", 0, 0.0, this->texture2dgroupDict[layer].texturePath.buffer());
+            // Arguments: (Parameter Name, Index, Time, Value)
+            shaderNode->getParm("basecolor_texture").setValue(0.0, this->texture2dgroupDict[layer].texturePath.buffer(), 
+                CH_STRING_LITERAL);
         }
-        if (!first) {
-            // hook up previous shader to new shader
+        if (first) {
+            first = false;
+            previousNode = shaderNode;
+            continue;
         }
-        // previous shader = new shader
-        first = false;
-    }
-    */
+        // Hook up the previous node to this node
+        UT_String mixName;
+        mixName.sprintf("mix_layer_%d", i);
+        OP_Node* layerMix = ((OP_Network*) matnetNode)->createNode("layermix", mixName);
+        if (!layerMix) {
+            std::cerr << "Error: unable to create layermix node for multi-properties." << std::endl;
+            return ErrorCode::OTHER;
+        }
 
-    LOG_DEBUG(this->debug, "stop 6");
+        int inputAIdx = layerMix->getInputFromName("A");
+        int inputBIdx = layerMix->getInputFromName("B");
+        int previousOutputIdx = previousNode->getOutputFromName("layer");
+        int shaderOutputIdx = shaderNode->getOutputFromName("layer");
+        if (inputAIdx >= 0 && inputBIdx >= 0 && previousOutputIdx >= 0 && shaderOutputIdx >= 0) {
+            layerMix->setInput(inputAIdx, previousNode, previousOutputIdx);
+            layerMix->setInput(inputBIdx, shaderNode, shaderOutputIdx);
+        } else {
+            std::cerr << "Error: layerMix ports not found" << std::endl;
+        }
+        layerMix->setRender(true);
+        layerMix->setDisplay(true);
+        layerMix->setFloat("alpha", 0, 0, 0.5f); // These parameters have these values by default, but just in case...
+        layerMix->setInt("surfacemode", 0, 0, 0);
+        layerMix->setInt("dispmode", 0, 0, 0);
+        if (layerMix->getDisplay()) {
+            LOG_DEBUG(this->debug, "Yah! display set!"); // XXXXX But we're not seeing it set!
+        }
+    }
+
+    OP_Network *net = (OP_Network*)matnetNode;
+    if (net) {
+        // Initialize the layout engine for your network
+        OP_Layout layoutEngine(net);
+
+        // Tell the engine to look at all nodes in this network
+        // We use the parent's child list to add everything
+        for (int i = 0; i < net->getNchildren(); ++i) {
+            OP_Node* child = net->getChild(i);
+            if (child) {
+                // OP_Layout works with OP_NetworkBoxItem (which OP_Node inherits from)
+                layoutEngine.addLayoutItem(child);
+            }
+        }
+
+        // Execute the layout
+        // OP_LAYOUT_TOP_TO_BOT is the standard Houdini vertical flow
+        layoutEngine.layoutOps(OP_LAYOUT_RIGHT_TO_LEFT, nullptr);
+    }
+    
+
+    LOG_DEBUG(this->debug, "stop 5");
 
     multiDict[id].id = id;
     multiDict[id].multiPids = layersList;
@@ -2755,15 +2771,20 @@ SOP_Read3mf::handleMultiproperties(XMLElement* element) {
     for (int resourceID : layersList) {
         LOG_DEBUG(this->debug, "    ID " << resourceID);
     }
-    LOG_DEBUG(this->debug, "stop 7");
+    LOG_DEBUG(this->debug, "stop 6");
+    LOG_DEBUG(this->debug, "For shader list ");
+    for (const auto &thisShader : shaderList) {
+        LOG_DEBUG(this->debug, "    SHADER " << thisShader.toStdString());
+    }
     // --------
+
     // Now handle each of the multi elements
     tinyxml2::XMLElement* descendant = element->FirstChildElement();
     // XXX Should I insist it have at least one multi? Two? Check spec.
     while (descendant != nullptr) {
         const char* tag_name_cstr = descendant->Name(); // plain tag name
         std::string tag_name(tag_name_cstr ? tag_name_cstr : ""); // Safely get tag name
-        LOG_DEBUG(false, std::string("     Got tagname ") + tag_name);
+        LOG_DEBUG(this->debug, std::string("     Got tagname ") + tag_name);
         if (tag_name == "m:multi") {
             const char* pindices_cstr = descendant->Attribute("pindices");
             if (pindices_cstr == nullptr) {
@@ -2783,6 +2804,17 @@ SOP_Read3mf::handleMultiproperties(XMLElement* element) {
                 pindicesList.push_back(static_cast<int>(val));
                 pindices_cstr = next; // Move the pointer to the start of the next number
             }
+            /*
+            // Use this instead of the previous loop to avoid a problem if there's a trailing space
+            // that strtol misses and then next gets set to that space... XXXX
+            UT_String pindicesStr(pindices_cstr);
+            UT_WorkArgs args;
+            pindicesStr.tokenize(args, " "); // Splitting by spaces
+
+            for (int i = 0; i < args.getArgc(); ++i) {
+                pindicesList.push_back(SYSatoi(args[i]));
+            }
+            */
             multiDict[id].multiPindices.push_back(std::move(pindicesList));
         } else {
             std::cerr << "We found a non-multi tag " << tag_name << " in the multiproperties section of the object." << std::endl;
@@ -2797,7 +2829,7 @@ SOP_Read3mf::handleMultiproperties(XMLElement* element) {
 
     LOG_DEBUG(this->debug, "Exiting handleMultiproperties");
 
-    return ErrorCode::OTHER;
+    return ErrorCode::SUCCESS;
 }
 
 //
@@ -3028,8 +3060,10 @@ SOP_Read3mf::handleObject(XMLElement* element) {
             LOG_DEBUG(false, "Converted default color to hex string: " << defaultColor);
 
         } else if (itm != multiDict.end()) {
-            std::cerr << "We do not yet handle multi-properties." << std::endl;
-            return ErrorCode::OTHER;
+            //std::cerr << "We do not yet handle multi-properties." << std::endl;
+            //return ErrorCode::OTHER;
+            defaultColor = "#ffffff";
+            LOG_DEBUG(this->debug, "Set default color to #ffffff");
         }
 
         // I have to call harden() here. Simple assignment is just a pointer and what it points to goes away.

@@ -75,7 +75,7 @@ namespace HDK_Sample {
         std::vector<int> multiPids; // list of resource ids for colorgroups, texture2dgroups, etc. for the different layers
         std::vector<std::vector<int>> multiPindices; // pindices into each layer group
         //std::vector<UT_String> multiShaders; // list of shader node paths one per layer
-        std::vector<UT_String> multiShaders; // list of shader nodes one per layer
+        std::vector<UT_StringHolder> multiShaders; // list of shader nodes one per layer
     };
 
     // Overload of operator << so I can print maps with MultiData in them
