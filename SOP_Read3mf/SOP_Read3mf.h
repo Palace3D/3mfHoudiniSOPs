@@ -69,10 +69,18 @@ do { \
 
 namespace HDK_Sample {
 
+    // Types of group a multiproperty layer could be
+    enum class MultiType {
+        COLOR = 0,  // color group
+        BASE,       // base material group
+        TEXTURE     // texture group
+    };
+
     // Information for each group of multi-properties
-    struct MultiData {
+        struct MultiData {
         int id; // resource group id
         std::vector<int> multiPids; // list of resource ids for colorgroups, texture2dgroups, etc. for the different layers
+        std::vector<MultiType> multiTypes; // list of what type each layer is for (color, base, texture)
         std::vector<std::vector<int>> multiPindices; // pindices into each layer group
         //std::vector<UT_String> multiShaders; // list of shader node paths one per layer
         std::vector<UT_StringHolder> multiShaders; // list of shader nodes one per layer
@@ -86,6 +94,20 @@ namespace HDK_Sample {
         os << ", Pids: [";
         for (size_t i = 0; i < data.multiPids.size(); ++i) {
             os << data.multiPids[i] << (i == data.multiPids.size() - 1 ? "" : ", ");
+        }
+        os << "]";
+
+        // Print layer group type
+        os << ", Types: [";
+        for (size_t i = 0; i < data.multiTypes.size(); ++i) {
+            switch(data.multiTypes[i]) {
+            case MultiType::COLOR:   os << "color"; break;
+            case MultiType::BASE:    os << "base"; break;
+            case MultiType::TEXTURE: os << "texture"; break;
+            default:                 os << "UNKNOWN"; break;
+        }
+            os << (i == data.multiTypes.size() - 1 ? "" : ", ");
+            //os << data.multiTypes[i] << (i == data.multiTypes.size() - 1 ? "" : ", ");
         }
         os << "]";
 
@@ -368,6 +390,8 @@ namespace HDK_Sample {
             GU_Detail* objGdp, UT_Map<PointKey, GA_Offset>& pointDict, GA_RWHandleID obj_h, GA_RWHandleV3 Cd_h,
             GA_RWHandleV3 UV_h, GA_RWHandleS material_h, GA_RWHandleS override_h);
         SOP_Read3mf::ErrorCode      clearData();
+        SOP_Read3mf::ErrorCode      colorFromTexture(const TextureGroupData &textureData, int pindex, std::string& returnColor);
+        SOP_Read3mf::ErrorCode      colorFromMulti(const MultiData &multiData, int pindex, std::string& returnColor);
     };
 } // End HDK_Sample namespace
 

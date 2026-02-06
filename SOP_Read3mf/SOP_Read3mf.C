@@ -446,7 +446,8 @@ parseTransformString(const std::string& transformString, UT_Matrix4& matrix) {
 
 //
 // Convert 3mf color format to Houdini's. Returns default color on failure. Includes alpha as
-// a parameter. We generally don't need alpha except for the base layer of multi-properties.
+// a parameter which will be set from the last 2 hex digits if there are 8, and to 1.0f if there
+// are only 6.
 //
 UT_Vector3
 convertHexStringToUTVector3(const std::string& hex_string, float& alpha, bool debug) {
@@ -559,6 +560,7 @@ convertColorToHexString(PixelColor color, bool debug) {
     int rScaled = static_cast<int>(std::round(color.r * 255.0f));
     int gScaled = static_cast<int>(std::round(color.g * 255.0f));
     int bScaled = static_cast<int>(std::round(color.b * 255.0f));
+    int aScaled = static_cast<int>(std::round(color.a * 255.0f));
 
     // convert to hex
     std::stringstream st;
@@ -574,11 +576,67 @@ convertColorToHexString(PixelColor color, bool debug) {
     // Insert each scaled value with a width of 2
     st << std::setw(2) << rScaled
     << std::setw(2) << gScaled
-    << std::setw(2) << bScaled;
+    << std::setw(2) << bScaled
+    << std::setw(2) << aScaled;
+
+    LOG_DEBUG(debug, "In convertColorToHexString we now have color " << st.str());
 
     // Get the final string
     return st.str();
 }
+
+//
+// Blend two colors together 50/50 but taking into account their alpha values.
+//
+PixelColor blendColors(const PixelColor &pc1, const PixelColor &pc2) {
+    float weight = 0.5f;
+
+    UT_Vector4 c1(pc1.r, pc1.g, pc1.b, pc1.a);
+    UT_Vector4 c2(pc2.r, pc2.g, pc2.b, pc2.a);
+    
+    // Pre-multiply by the weight of alpha
+    float r1 = c1.x() * c1.w();
+    float g1 = c1.y() * c1.w();
+    float b1 = c1.z() * c1.w();
+    
+    float r2 = c2.x() * c2.w();
+    float g2 = c2.y() * c2.w();
+    float b2 = c2.z() * c2.w();
+    
+    // Mix Alpha
+    float outA = c1.w() + weight * (c2.w() - c1.w());
+    
+    // Mix RGB and Un-multiply
+    UT_Vector4 result;
+    if (outA > 0.0001f) {
+        result.x() = ((r1 * 0.5f) + (r2 * 0.5f)) / outA;
+        result.y() = ((g1 * 0.5f) + (g2 * 0.5f)) / outA;
+        result.z() = ((b1 * 0.5f) + (b2 * 0.5f)) / outA;
+    } else {
+        result.assign(0, 0, 0); // Completely transparent
+    }
+
+    PixelColor returnColor{ (float) result.x(), (float) result.y(), (float) result.z(), outA };
+    
+    return returnColor;
+}
+
+PixelColor blend3mfLayer(const PixelColor &accumulated, const PixelColor &newLayer) {
+    // According to 3MF Spec:
+    // accumulatedColor.rgb = newLayer.rgb * newLayer.a + accumulatedColor.rgb * (1 – newLayer.a)
+    // accumulatedColor.a = newLayer.a + accumulatedColor.a * (1 – newLayer.a)
+
+    float invA = (1.0f - newLayer.a);
+
+    PixelColor result;
+    result.r = (newLayer.r * newLayer.a) + (accumulated.r * invA);
+    result.g = (newLayer.g * newLayer.a) + (accumulated.g * invA);
+    result.b = (newLayer.b * newLayer.a) + (accumulated.b * invA);
+    result.a = newLayer.a + (accumulated.a * invA);
+
+    return result;
+}
+
 
 
 //
@@ -1593,10 +1651,12 @@ SOP_Read3mf::parseModelForSubnet(std::string the_model) {
 
     // XXXXXXX
     if (!this->geoOnly) {
+        /*
         printMap(texture2dgroupDict, "texture2dgroupDict", this->debug);
         printMap(multiDict, "multiDict", this->debug);
         printMap(shaderDict, "shaderDict", this->debug);
         printMap(textureFilesDict, "textureFilesDict", this->debug);
+        */
     }
     // XXXXXX
 
@@ -1745,10 +1805,11 @@ SOP_Read3mf::parseModel(std::string the_model) {
             }
         }
     }
-
+/*
     printMap(buildDict, "buildDict", this->debug);
     printMap(vertexDict, "vertexDict", this->debug);
     printObjectMap(objectDict, "objectDict", this->debug);
+*/
     // XXXXXXX
     /*
     if (!this->geoOnly) {
@@ -2671,6 +2732,7 @@ SOP_Read3mf::handleMultiproperties(XMLElement* element) {
     OP_Node* previousNode;
     bool first = true;
     std::vector<UT_StringHolder> shaderList;
+    std::vector<MultiType> multiTypes;
     LOG_DEBUG(this->debug, "There are " << layersList.size() << " layers.");
     shaderList.reserve(layersList.size());
     for (size_t i = 0; i < layersList.size(); ++i) {
@@ -2692,8 +2754,12 @@ SOP_Read3mf::handleMultiproperties(XMLElement* element) {
         //fullShaderPath.harden(); // This didn't actually take care of the garbage memory problem, now using Holder instead
         LOG_DEBUG(this->debug, "Got shader path " << fullShaderPath);
         shaderList.push_back(UT_StringHolder(fullShaderPath));
-        if (itc != colorDict.end() || itb != basematDict.end()) {
-            LOG_DEBUG(this->debug, "Layer " << layer << " is a color or base material");
+        if (itc != colorDict.end()) {
+            LOG_DEBUG(this->debug, "Layer " << layer << " is a color");
+            multiTypes.push_back(MultiType::COLOR);
+        } else if (itb != basematDict.end()) {
+            LOG_DEBUG(this->debug, "Layer " << layer << " is a basematerial");
+            multiTypes.push_back(MultiType::BASE);
         } else if (itt != texture2dgroupDict.end()) {
             LOG_DEBUG(this->debug, "Layer " << layer << " is a texture");
             shaderNode->setFloat("basecolor", 0, 0.0, 1.0f);
@@ -2706,6 +2772,7 @@ SOP_Read3mf::handleMultiproperties(XMLElement* element) {
             // Arguments: (Parameter Name, Index, Time, Value)
             shaderNode->getParm("basecolor_texture").setValue(0.0, this->texture2dgroupDict[layer].texturePath.buffer(), 
                 CH_STRING_LITERAL);
+            multiTypes.push_back(MultiType::TEXTURE);
         }
         if (first) {
             first = false;
@@ -2765,6 +2832,7 @@ SOP_Read3mf::handleMultiproperties(XMLElement* element) {
     LOG_DEBUG(this->debug, "stop 5");
 
     multiDict[id].id = id;
+    multiDict[id].multiTypes = multiTypes;
     multiDict[id].multiPids = layersList;
     multiDict[id].multiShaders = shaderList;
     LOG_DEBUG(this->debug, "For multiproperties group " << id);
@@ -2832,6 +2900,7 @@ SOP_Read3mf::handleMultiproperties(XMLElement* element) {
     return ErrorCode::SUCCESS;
 }
 
+
 //
 // Parse the build entry for the tree to see what objects should be present as
 // part of the build and what their transforms should be. We'll create and record this info in a dictionary
@@ -2896,6 +2965,129 @@ SOP_Read3mf::handleBuild(XMLElement* element) {
     }
 
     LOG_DEBUG(this->debug, "Exiting handleBuild");
+
+    return ErrorCode::SUCCESS;
+}
+
+
+//
+// Get the color at a particular pixel of a texture.
+//
+SOP_Read3mf::ErrorCode
+SOP_Read3mf::colorFromTexture(const TextureGroupData &textureData, int pindex, std::string &returnColor) {
+    LOG_DEBUG(this->debug, "Entering colorFromTexture");
+    std::string texturePathFs;
+    texturePathFs = textureData.texturePath; 
+
+    std::vector<std::array<float, 2>> coordArray = textureData.coords;
+    if (coordArray.size() <= pindex || pindex < 0) {
+        std::cerr << "Error: Index into array of texture coordinates is out of bounds." << std::endl;
+        LOG_DEBUG(false, "pindex is " << pindex << " and size of coordArray is " << coordArray.size());
+        return ErrorCode::BAD_3MF;
+    }
+    const std::array<float, 2> uvcoords = coordArray[pindex];
+    LOG_DEBUG(false, "In handle object we got default texture coords of [" << uvcoords[0] << ", " << uvcoords[1] << "]");
+    
+    PixelColor color;
+    if (colormap(texturePathFs, uvcoords, color, this->debug) != ErrorCode::SUCCESS) {
+        std::cerr << "Unable to get color of pixel in default texture for an object " << std::endl;
+        return ErrorCode::OTHER;
+    }
+    LOG_DEBUG(false, "Got default object color of [" << color.r << ", " << color.g
+        << ", " << color.b << "] plus alpha " << color.a);
+    
+    returnColor = convertColorToHexString(color, this->debug);
+    LOG_DEBUG(this->debug, "Got color " << returnColor);
+    LOG_DEBUG(this->debug, "Returning from colorFromTexture");
+
+    return ErrorCode::SUCCESS;
+}
+
+
+//
+// Get the color at a particular multiproperties setting.
+//
+SOP_Read3mf::ErrorCode
+SOP_Read3mf::colorFromMulti(const MultiData &multiData, int pindex, std::string &returnColorStr) {
+    LOG_DEBUG(this->debug, "Entering colorFromMulti");
+
+    //returnColor = "#ff0000";
+    std::vector<int> layerList = multiData.multiPids;
+    std::vector<MultiType> multiTypes = multiData.multiTypes;
+    std::vector<int> pindices = multiData.multiPindices[pindex];
+    PixelColor color;
+    std::vector<PixelColor> colorsToBlend;
+
+    LOG_DEBUG(this->debug, "We have layer list size of " << layerList.size());
+
+    for (int i = 0; i < layerList.size(); ++i) {
+        LOG_DEBUG(this->debug, "Cycle " << i);
+        int pid = layerList[i];
+        int index = pindices[i];
+        if (multiTypes[i] == MultiType::COLOR) {
+            LOG_DEBUG(this->debug, "For group " << pid << " it's color");
+            LOG_DEBUG(this->debug, "and we're using index " << index);
+            std::string colorString = colorDict[pid][index];
+            LOG_DEBUG(this->debug, "and the color is " << colorString);
+            float alpha;
+            UT_Vector3 aColor = convertHexStringToUTVector3(colorString, alpha, false);
+            color.r = aColor[0];
+            color.g = aColor[1];
+            color.b = aColor[2];
+            color.a = alpha;
+            colorsToBlend.push_back(color);
+        } else if (multiTypes[i] == MultiType::BASE) {
+            LOG_DEBUG(this->debug, "For group " << pid << " it's base");
+            LOG_DEBUG(this->debug, "and we're using index " << index);
+            std::string colorString = basematDict[pid][index];
+            LOG_DEBUG(this->debug, "and the color is " << colorString);
+            float alpha;
+            UT_Vector3 aColor = convertHexStringToUTVector3(colorString, alpha, false);
+            color.r = aColor[0];
+            color.g = aColor[1];
+            color.b = aColor[2];
+            color.a = alpha;
+            colorsToBlend.push_back(color);
+        } else if (multiTypes[i] == MultiType::TEXTURE) {
+            LOG_DEBUG(this->debug, "For group " << pid << " it's a texture");
+            TextureGroupData textureInfo = texture2dgroupDict[pid];
+            float alpha;;
+            UT_String texturePath = textureInfo.texturePath;
+            std::vector<std::array<float, 2>> coords = textureInfo.coords;
+            LOG_DEBUG(this->debug, "and we have texture info " << textureInfo);
+            if (colorFromTexture(textureInfo, index, returnColorStr) != ErrorCode::SUCCESS) {
+                std::cerr << "Error: Could not get color from texture pixel" << std::endl;
+                return ErrorCode::OTHER;
+            }
+            LOG_DEBUG(this->debug, "Got color from texture " << returnColorStr);
+            UT_Vector3 aColor = convertHexStringToUTVector3(returnColorStr, alpha, false);
+            color.r = aColor[0];
+            color.g = aColor[1];
+            color.b = aColor[2];
+            color.a = alpha;
+            colorsToBlend.push_back(color);
+        } else {
+            LOG_DEBUG(this->debug, "Whatever this multitype is, we don't handle it");
+            std::cerr << "Error: MultiType that we don't handle." << std::endl;
+            return ErrorCode::OTHER;
+        }
+    }
+
+    LOG_DEBUG(this->debug, "Ending with blendColors of ");
+    if (colorsToBlend.size() < 2) {
+        std::cerr << "Error: there weren't enough layers of colors to blend them." << std::endl;
+    }
+    PixelColor returnColor = colorsToBlend[0];
+    for (size_t i = 1; i < colorsToBlend.size(); ++i) {
+        LOG_DEBUG(this->debug, "    (" << colorsToBlend[i].r << ", " << colorsToBlend[i].g << ", "
+            << colorsToBlend[i].b << ", alpha: " << colorsToBlend[i].a << ")\n");
+        //returnColor = blendColors(returnColor, colorsToBlend[i]);
+        returnColor = blend3mfLayer(returnColor, colorsToBlend[i]);
+    }
+
+    returnColorStr = convertColorToHexString(returnColor, this->debug);
+    LOG_DEBUG(this->debug, "Eventual return color is " << returnColorStr);
+    LOG_DEBUG(this->debug, "Returning from colorFromMulti");
 
     return ErrorCode::SUCCESS;
 }
@@ -2995,7 +3187,7 @@ SOP_Read3mf::handleObject(XMLElement* element) {
                 return ErrorCode::BAD_3MF;
             }
         }
-        objectDict[id]->defaultColorGroup = pid; // defaultColorGroup will be -1 if there was no pid
+        objectDict[id]->defaultColorGroup = pid; // faultColorGroup will be -1 if there was no pid
         LOG_DEBUG(this->debug, "Object id " << id << " has pid " << pid << ".");
         const char* pindex_cstr = element->Attribute("pindex");
         int pindex = -1;
@@ -3014,61 +3206,46 @@ SOP_Read3mf::handleObject(XMLElement* element) {
         
         LOG_DEBUG(this->debug, "Object id " << id << " has pindex " << pindex << ".");
 
-        UT_String defaultColor = DEFAULT_COLOR.data(); // This also covers the case where pid == -1
+        UT_StringHolder defaultColor = DEFAULT_COLOR.data(); // This also covers the case where pid == -1
         auto itc = colorDict.find(pid);
         auto itb = basematDict.find(pid);
         auto itt = texture2dgroupDict.find(pid);
         auto itm = multiDict.find(pid);
 
         if (itc != colorDict.end()) {
-            std::vector<std::string> colorArray = itc->second;
+            // std::vector<std::string> colorArray = itc->second; XXX Don't need?
             std::string color = itc->second[pindex];
             LOG_DEBUG(this->debug, "We got color " << color << " in colorDict");
-            defaultColor = color;
+            defaultColor = color.c_str();
         } else if (itb != basematDict.end()) {
             std::string displayColor = itb->second[pindex];
-            defaultColor = displayColor;
+            defaultColor = displayColor.c_str();
             LOG_DEBUG(this->debug, "We got displayColor " << displayColor << " in basematDict");
         } else if (itt != texture2dgroupDict.end()) {
-            std::string texturePathFs;
-            auto itf = texture2dgroupDict.find(pid);
-            if (itf != texture2dgroupDict.end()) {
-                texturePathFs = itf->second.texturePath; 
-            } else {
-                std::cerr << "No texture found for object  " << id << " pid " << pid << std::endl;
+            //XXXXX
+            std::string returnColor;
+            if (colorFromTexture(itt->second, pindex, returnColor) != ErrorCode::SUCCESS) {
+                std::cerr << "Error: Could not get color from texture pixel" << std::endl;
                 return ErrorCode::OTHER;
             }
-
-            std::vector<std::array<float, 2>> coordArray = itt->second.coords;
-            if (coordArray.size() <= pindex || pindex < 0) {
-                std::cerr << "Error: Index into array of texture coordinates is out of bounds." << std::endl;
-                LOG_DEBUG(false, "pindex is " << pindex << " and size of coordArray is " << coordArray.size());
-                return ErrorCode::BAD_3MF;
-            }
-            const std::array<float, 2> uvcoords = coordArray[pindex];
-            LOG_DEBUG(false, "In handle object we got default texture coords of [" << uvcoords[0] << ", " << uvcoords[1] << "]");
-            
-            PixelColor color;
-            if (colormap(texturePathFs, uvcoords, color, this->debug) != ErrorCode::SUCCESS) {
-                std::cerr << "Unable to get color of pixel in default texture for objectID " << id << std::endl;
-                return ErrorCode::OTHER;
-            }
-            LOG_DEBUG(false, "Got default object color of [" << color.r << ", " << color.g
-                << ", " << color.b << "] plus alpha " << color.a);
-            
-            defaultColor = convertColorToHexString(color, this->debug);
-            LOG_DEBUG(false, "Converted default color to hex string: " << defaultColor);
-
+            defaultColor = returnColor.c_str();
+            LOG_DEBUG(this->debug, "Received default color of: " << defaultColor.buffer());
         } else if (itm != multiDict.end()) {
-            //std::cerr << "We do not yet handle multi-properties." << std::endl;
-            //return ErrorCode::OTHER;
-            defaultColor = "#ffffff";
+            LOG_DEBUG(this->debug, "Got multi item with key " << itm->first << " and value " << itm->second);
+            std::string returnColor;
+            if (colorFromMulti(itm->second, pindex, returnColor) != ErrorCode::SUCCESS) {
+                std::cerr << "Error: Could not get color from texture pixel" << std::endl;
+                return ErrorCode::OTHER;
+            }
+            defaultColor = returnColor.c_str();
+            //defaultColor = "#ffffff";
             LOG_DEBUG(this->debug, "Set default color to #ffffff");
         }
 
         // I have to call harden() here. Simple assignment is just a pointer and what it points to goes away.
         // This way it is allocated on the heap and stays until cleaned up in clearData().
-        objectDict[id]->defaultColor.harden(defaultColor.buffer());
+        objectDict[id]->defaultColor = defaultColor;
+        objectDict[id]->defaultColor.harden();
     }
     // XXXXXXXX
 
@@ -3763,7 +3940,7 @@ SOP_Read3mf::handleTriangle(XMLElement* element, int& numTriangles, const int ob
                 }
 
             } else {
-                color = colorArray[basemat_p];
+                color = colorArray[basemat_p]; // Why is this basemat_p and not something else?? XXXXX
                 LOG_DEBUG(false, "from basemat");
             }
             float alpha;
