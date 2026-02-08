@@ -274,14 +274,45 @@ namespace HDK_Sample {
         struct TextureGroupData {
             UT_String texturePath;
             std::vector<std::array<float, 2>> coords;
-            int originalTexId; // Useful for debugging
+            int originalTexId; // Useful for debugging, but not kept up-to-date in TriangleState!
 
             // Overload for TextureGroupData
             friend std::ostream& operator<<(std::ostream& os, const TextureGroupData& data) {
                 os << "{Path: " << data.texturePath 
                    << ", Coords Count: " << data.coords.size() 
-                   << ", OrigID: " << data.originalTexId << "}";
+                   << ", OrigID: " << data.originalTexId << "}"; // Warning: not kept valid in TriangleState!
                 return os;
+            }
+        };
+
+        // State for cacahing information we'd like not to look up per triangle.
+        struct TriangleState {
+            bool caching = false;
+            int pid = -1;
+            int groupID = -1;
+            std::vector<PixelColor>* colorArray = nullptr;    // An array of colors in a color group
+            std::vector<std::array<float, 2>>* coordArray = nullptr;   // An array of coordinates for a texture
+            UT_String* texturePath = nullptr; // Path to the texture
+            std::vector<PixelColor>* basematArray = nullptr;  // An array of base material colors for a basematerial group
+            std::vector<int>* multiPids = nullptr; // The pids per layer of a multiproperty
+            std::vector<MultiType>* multiTypes = nullptr; // The type of each layer of a multiproperty
+            std::vector<std::vector<int>>* multiPindices = nullptr; // The list of pindices for each layer (indices into colors or coordinates)
+            std::vector<UT_StringHolder>* multiShaders = nullptr; // The list of shaders for each layer of a multiproperty
+            std::string cachedJson = "";
+
+            void clear() {
+                caching = false;
+                pid = -1;
+                groupID = -1;
+                colorArray = nullptr;
+                coordArray = nullptr;
+                texturePath = nullptr;
+                basematArray = nullptr;
+                multiPids = nullptr;
+                multiTypes = nullptr;
+                multiPindices = nullptr;
+                multiShaders = nullptr;
+                cachedJson.clear();
             }
         };
 
@@ -405,14 +436,15 @@ namespace HDK_Sample {
         SOP_Read3mf::ErrorCode      handleTriangles(tinyxml2::XMLElement* element, int& numTriangles, const int objID);
         SOP_Read3mf::ErrorCode      handleTriangle(tinyxml2::XMLElement* element, int& numTriangles, const int objID,
             GU_Detail* objGdp, UT_Map<PointKey, GA_Offset>& pointDict, GA_RWHandleID& obj_h, GA_RWHandleV3& Cd_h,
-            GA_RWHandleF& alpha_h, GA_RWHandleV3& UV_h, GA_RWHandleS& material_h, GA_RWHandleS& override_h);
+            GA_RWHandleF& alpha_h, GA_RWHandleV3& UV_h, GA_RWHandleS& material_h, GA_RWHandleS& override_h,
+            TriangleState& triangleState);
         SOP_Read3mf::ErrorCode      clearData();
         PixelColor                  convertHexStringToPixelColor(const std::string& hex_string);
         SOP_Read3mf::ErrorCode      colorFromTexture(const TextureGroupData &textureData, int pindex, PixelColor& returnColor);
         SOP_Read3mf::ErrorCode      colorFromMulti(const MultiData &multiData, int pindex, PixelColor& returnColor);
         SOP_Read3mf::ErrorCode      createMultiLayerAttrs();
         SOP_Read3mf::ErrorCode      setColorAttrs(const int groupID, const PixelColor& defaultColor,
-            const std::vector<PixelColor>& colorArray, const bool useBase, const std::vector<PixelColor>& basematArray,
+            const std::vector<PixelColor>* colorArray, const bool useBase, const std::vector<PixelColor>* basematArray,
             GU_PrimPoly *poly, const int p1, const int p2, const int p3, GA_RWHandleV3& Cd_h, GA_RWHandleF& alpha_h);
     };
 } // End HDK_Sample namespace

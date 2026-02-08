@@ -501,8 +501,7 @@ colormap(std::string texturePath, const std::array<float, 2>& uv, PixelColor& co
 
     unsigned char *data = stbi_load(texturePath.c_str(), &width, &height, &numChannels, 4);
     if (!data) {
-        std::string errorMsg = "Error: Texture image file not found or failed to load: " + texturePath;
-        std::cerr << errorMsg << std::endl;
+        std::cerr << "Error: Texture image file not found or failed to load: " << texturePath << std::endl;
         return SOP_Read3mf::ErrorCode::FILE_FAILURE;
     }
     // clamp values -- should I bother?
@@ -632,7 +631,7 @@ printMultiMap(const std::unordered_multimap<K, V>& map, const std::string& name,
         return;
     }
     LOG_DEBUG(debug, std::endl);
-    LOG_DEBUG(debug, "--- Contents of MultiMap: " + name + " ---");
+    LOG_DEBUG(debug, "--- Contents of MultiMap: " << name << " ---");
     std::stringstream st;
     st << '{' << std::endl;
     for (const auto& pair : map) {
@@ -654,7 +653,7 @@ void printMap(const T& map, const std::string& name, bool debug) {
         return; // Optimization: don't even build the string if debug is off
     }
     LOG_DEBUG(debug, std::endl);
-    LOG_DEBUG(debug, "--- Contents of Map: " + name + " ---");
+    LOG_DEBUG(debug, "--- Contents of Map: " << name << " ---");
     std::stringstream st;
     st << '{' << std::endl;
     
@@ -760,7 +759,7 @@ getFileInfo(std::string path, std::string &dir, std::string &stem, std::string &
     LOG_DEBUG(false, "Entering getFileInfo.");
     
     // Set up pieces we'll use if we need to create a new texture file.
-    LOG_DEBUG(false, "Entering with path = " + path);
+    LOG_DEBUG(false, "Entering with path = " << path);
 
     // Create a std::filesystem::path object from the string
     std::filesystem::path full_path(path);
@@ -1202,6 +1201,64 @@ SOP_Read3mf::matnetOverrideSetup() {
     LOG_DEBUG(this->debug, "Exiting matnetOverrideSetup");
     return;
 }
+
+
+//
+// Set the color attributes on the vertices of a triangle.
+//
+SOP_Read3mf::ErrorCode
+SOP_Read3mf::setColorAttrs(const int groupID, const PixelColor& defaultColor, const std::vector<PixelColor>* colorArray,
+    const bool useBase, const std::vector<PixelColor>* basematArray,
+    GU_PrimPoly *poly, const int p1, const int p2, const int p3, GA_RWHandleV3& Cd_h, GA_RWHandleF& alpha_h) {
+    LOG_DEBUG(this->debug, "Entering setColorAttrs");
+    // The pindices choose a color for this point
+
+    // lambda function to avoid writing this 3 times for 3 vertices
+    // basematArray and colorArray should not be null given how we're called, but just in case, I check for that
+    auto assign_vertex_color = [&](int local_vtx_idx, int index_p) -> void {
+        PixelColor color;
+        if (groupID == -1 || index_p == -1) {
+            color = defaultColor;
+            LOG_DEBUG(false, "groupID and basemat -1 so assigning default color");
+        } else if (useBase) {  // Check for base mat color
+            if (basematArray && !basematArray->empty() && basematArray->size() >= (size_t) index_p + 1) {
+                color = (*basematArray)[index_p];
+                LOG_DEBUG(false, "basemat");
+            } else {
+                color = defaultColor;
+                LOG_DEBUG(false, "basemat default");
+            }
+        } else {
+            if (colorArray && !colorArray->empty() && colorArray->size() >= (size_t) index_p + 1) {
+                color = (*colorArray)[index_p];
+                LOG_DEBUG(false, "color");
+            } else {
+                color = defaultColor;
+                LOG_DEBUG(false, "color default");
+            }
+        }
+        float alpha = color.a;
+        UT_Vector3 aColor = color.rgb;
+        GA_Offset global_vtx_off = poly->getVertexOffset(local_vtx_idx);
+        Cd_h.set(global_vtx_off, aColor);
+        alpha_h.set(global_vtx_off, alpha);
+        LOG_DEBUG(false, "Set vertex color to " << color);
+    };
+
+    if (this->flip) { // Where to flip what is a little puzzling. It appears we need to do so again.
+        assign_vertex_color(0, p3);
+        assign_vertex_color(1, p2);
+        assign_vertex_color(2, p1);
+    } else {
+        assign_vertex_color(0, p1);
+        assign_vertex_color(1, p2);
+        assign_vertex_color(2, p3);
+    }
+
+    LOG_DEBUG(this->debug, "Exiting setColorAttrs");
+    return ErrorCode::SUCCESS;
+}
+
 
 
 /*
@@ -2204,10 +2261,10 @@ SOP_Read3mf::handleTiling(int id, std::string path, Tiling tilestyleU, Tiling ti
     }
     // Note that we do not deal with clamp/none tiling here, since we need to know the max and min uv coordinates
     // before we can do that. That happens in handleTexture2dgroup() instead.
-    LOG_DEBUG(false, "Coming back from tiling, usePath is now " + usePath);
+    LOG_DEBUG(false, "Coming back from tiling, usePath is now " << usePath);
 
     stbi_image_free(originalData);
-    LOG_DEBUG(this->debug, "Exiting handleTiling with success of " + std::to_string(success));
+    LOG_DEBUG(this->debug, "Exiting handleTiling with success of " << success);
     if (!success) {
         return ErrorCode::OTHER;
     }
@@ -2247,8 +2304,8 @@ SOP_Read3mf::handleTexture2dgroup(tinyxml2::XMLElement* element) {
         return ErrorCode::BAD_3MF;
     }
     std::string textureFile = itf->second;
-    LOG_DEBUG(false, "Got textureFile from dict of " + textureFile);
-    LOG_DEBUG(false, "Got texid " + std::to_string(texid) + " and id " + std::to_string(id));
+    LOG_DEBUG(false, "Got textureFile from dict of " << textureFile);
+    LOG_DEBUG(false, "Got texid " << texid << " and id " << id);
 
     // Get the info about tiling for this texture
     auto ituv = textureModifyUVsDict.find(texid);
@@ -2924,7 +2981,7 @@ SOP_Read3mf::handleMultiproperties(XMLElement* element) {
     while (descendant != nullptr) {
         const char* tag_name_cstr = descendant->Name(); // plain tag name
         std::string tag_name(tag_name_cstr ? tag_name_cstr : ""); // Safely get tag name
-        LOG_DEBUG(this->debug, std::string("     Got tagname ") + tag_name);
+        LOG_DEBUG(this->debug, "     Got tagname " << tag_name);
         if (tag_name == "m:multi") {
             const char* pindices_cstr = descendant->Attribute("pindices");
             if (pindices_cstr == nullptr) {
@@ -3598,7 +3655,7 @@ SOP_Read3mf::handleVertices(XMLElement* element, int& numVertices, const int obj
     while (descendant != nullptr) {
         const char* tag_name_cstr = descendant->Name(); // plain tag name
         std::string tag_name(tag_name_cstr ? tag_name_cstr : ""); // Safely get tag name
-        LOG_DEBUG(false, std::string("     Got tagname ") + tag_name);
+        LOG_DEBUG(false, "     Got tagname "<< tag_name);
         if (tag_name == "vertex") {
             double xpos = 0.0, ypos = 0.0, zpos = 0.0;
             XMLError result_x = descendant->QueryDoubleAttribute("x", &xpos);
@@ -3617,9 +3674,8 @@ SOP_Read3mf::handleVertices(XMLElement* element, int& numVertices, const int obj
             UT_Vector3 p_coord(xpos, ypos, zpos);
             
             this->vertexDict[numVertices] = pos;
-            LOG_DEBUG(false, std::string("    Got vertex pos ") + std::to_string(xpos) + ", " + std::to_string(ypos)
-                + ", " + std::to_string(zpos) + std::string(" for vertex # ")
-                + std::to_string(numVertices));
+            LOG_DEBUG(false, "    Got vertex pos " << xpos << ", " << ypos << ", " << zpos << " for vertex # "
+                << numVertices);
 
             // We now create the actual points in handleTriangle()
             // as compared to the python version.
@@ -3672,17 +3728,14 @@ SOP_Read3mf::handleTriangles(XMLElement* element, int& numTriangles, const int o
         return ErrorCode::OTHER;
     }
 
-    // XXX Check somehow if we're *really* using color on  triangles. Alas, that check happens for real
+    // XXX Check somehow if we're *really* using color/texture/whatever on the triangles. Alas, that check happens for real
     // in handleTriangle(), but it's expensive to do all this for every triangle, so we do it here.
     // When this was in handleTriangle() I tested if we'd already created it by trying to find an existing vertex color attribute
-    //GA_RWHandleV3 Cd_h(objGdp->findDiffuseAttribute(GA_ATTRIB_VERTEX));
-    //if (!Cd_h.isValid()) {
-    // create it
-    //}
-    // Does the above guarantee it's a color attribute?? XXX
+    // Does this guarantee it's a color attribute?? XXX
     //GA_RWHandleV3 Cd_h(objGdp->findDiffuseAttribute(GA_ATTRIB_VERTEX));
     // XXXXXX
-    // These are safely invalid when declared this way.
+    // These are safely invalid when declared this way. Is it okay to do this once per object as we are? Or should I
+    // keep them across objects? Will this mess up objects that already have had attributes applied? XXXXX
     GA_RWHandleV3 Cd_h;
     GA_RWHandleF alpha_h;
     GA_RWHandleV3 UV_h;
@@ -3740,16 +3793,17 @@ SOP_Read3mf::handleTriangles(XMLElement* element, int& numTriangles, const int o
     // XXXXXXXX
 
     UT_Map<PointKey, GA_Offset> localPointDict;
+    TriangleState triangleState;
 
     tinyxml2::XMLElement* descendant = element->FirstChildElement();
     LOG_DEBUG(false, "got next descendent element");
     while (descendant != nullptr) {
         const char* tag_name_cstr = descendant->Name(); // plain tag name
         std::string tag_name(tag_name_cstr ? tag_name_cstr : ""); // Safely get tag name
-        LOG_DEBUG(false, std::string("     Got tagname ") + tag_name);
+        LOG_DEBUG(false, "     Got tagname " << tag_name);
         if (tag_name == "triangle") {
             if (handleTriangle(descendant, numTriangles, objID, objGdp, localPointDict, obj_h, Cd_h, alpha_h, UV_h,
-                material_h, override_h) != ErrorCode::SUCCESS) {
+                material_h, override_h, triangleState) != ErrorCode::SUCCESS) {
                 std::cerr << "Error: Unable to handle a triangle for object ID " << objID << "." << std::endl;
                 return ErrorCode::BAD_3MF;
             }
@@ -3778,58 +3832,6 @@ SOP_Read3mf::handleTriangles(XMLElement* element, int& numTriangles, const int o
 
 
 //
-// Set the color attributes on the vertices of a triangle.
-//
-SOP_Read3mf::ErrorCode
-SOP_Read3mf::setColorAttrs(const int groupID, const PixelColor& defaultColor, const std::vector<PixelColor>& colorArray,
-    const bool useBase, const std::vector<PixelColor>& basematArray,
-    GU_PrimPoly *poly, const int p1, const int p2, const int p3, GA_RWHandleV3& Cd_h, GA_RWHandleF& alpha_h) {
-    LOG_DEBUG(this->debug, "Entering setColorAttrs");
-    // The pindices choose a color for this point
-
-    // lambda function to avoid writing this 3 times for 3 vertices
-    auto assign_vertex_color = [&](int local_vtx_idx, int index_p) -> void {
-        PixelColor color;
-        if (groupID == -1 || index_p == -1) {
-            color = defaultColor;
-            LOG_DEBUG(false, "groupID and basemat -1 so assigning default color");
-        } else if (useBase) {  // Check for base mat color
-            //const std::vector<std::string>& basematArray = itb->second;
-            if (basematArray.size() < (size_t) index_p + 1) {
-                color = defaultColor;
-                LOG_DEBUG(false, "basemat default");
-            } else {
-                color = basematArray[index_p];
-                LOG_DEBUG(false, "basemat");
-            }
-        } else { // We know it's regular color, so use that
-            color = colorArray[index_p];
-            LOG_DEBUG(false, "from basemat");
-        }
-        float alpha = color.a;
-        UT_Vector3 aColor = color.rgb;
-        GA_Offset global_vtx_off = poly->getVertexOffset(local_vtx_idx);
-        Cd_h.set(global_vtx_off, aColor);
-        alpha_h.set(global_vtx_off, alpha);
-        LOG_DEBUG(false, "Set vertex color to " << color);
-    };
-
-    if (this->flip) { // Where to flip what is a little puzzling. It appears we need to do so again.
-        assign_vertex_color(0, p3);
-        assign_vertex_color(1, p2);
-        assign_vertex_color(2, p1);
-    } else {
-        assign_vertex_color(0, p1);
-        assign_vertex_color(1, p2);
-        assign_vertex_color(2, p3);
-    }
-
-    LOG_DEBUG(this->debug, "Exiting setColorAttrs");
-    return ErrorCode::SUCCESS;
-}
-
-
-//
 // Add a primitive to the mesh. This is where all the interesting stuff happens.
 // The pid of the triangle points to a colorgroup/basematerials/texture2dgroup/multiproperties
 // The pindices (p1, p2, p3) have further indexing info for each vertex of the triangle
@@ -3842,17 +3844,12 @@ SOP_Read3mf::setColorAttrs(const int groupID, const PixelColor& defaultColor, co
 //
 SOP_Read3mf::ErrorCode
 SOP_Read3mf::handleTriangle(XMLElement* element, int& numTriangles, const int objID, GU_Detail* objGdp,
-    UT_Map<PointKey, GA_Offset>& pointDict, GA_RWHandleID& obj_h,
-    GA_RWHandleV3& Cd_h, GA_RWHandleF& alpha_h, GA_RWHandleV3& UV_h, GA_RWHandleS& material_h, GA_RWHandleS& override_h) {
+    UT_Map<PointKey, GA_Offset>& pointDict, GA_RWHandleID& obj_h, GA_RWHandleV3& Cd_h, GA_RWHandleF& alpha_h,
+    GA_RWHandleV3& UV_h, GA_RWHandleS& material_h, GA_RWHandleS& override_h, TriangleState& triangleState) {
 
     LOG_DEBUG(this->debug, "Entering handleTriangle");
-
-    // Set up the triangle default color in case it is needed.
-    PixelColor defaultColor = this->objectDict[objID]->defaultColor;
-    LOG_DEBUG(false, "Got default color of " << defaultColor << " from object " << objID);
     LOG_DEBUG(false, "We currently have " << objGdp->getNumPoints() << " points, "
         << objGdp->getNumVertices() << " vertices, and " << objGdp->getNumPrimitives() << " prims");
-
 
     // For each vertex on the triangle, set up its index into the list of vertices in the 3mf file.
     // This can be confusing, since the 3mf format numbers the vertices from 1 rather than 0.
@@ -3883,8 +3880,7 @@ SOP_Read3mf::handleTriangle(XMLElement* element, int& numTriangles, const int ob
         verts[2] = buffer;
     }
 
-    LOG_DEBUG(false, std::string("    We have v1: ") + std::to_string(verts[0]) + std::string(" v2: ") + std::to_string(verts[1])
-        + std::string(" v3: ") + std::to_string(verts[2]));
+    LOG_DEBUG(false, "    We have v1: " << verts[0] << " v2: " << verts[1] << " v3: " << verts[2]);
 
     // Now that we have the indices for the vertices/points, use those indices to get their coordinates and add those
     // to vertexDict. (They are called vertices in 3mf but points in Houdini.)
@@ -3914,37 +3910,29 @@ SOP_Read3mf::handleTriangle(XMLElement* element, int& numTriangles, const int ob
         // Safe Assignment: We now know indices 0, 1, and 2 exist
         posList[i].assign(vert_coords[0], vert_coords[1], vert_coords[2]);
 
-        LOG_DEBUG(false, "Vertex " + std::to_string(i) + " (ID:" + std::to_string(verts[i]) + 
-                              ") pos: " + std::to_string(vert_coords[0]) + ", " + 
-                              std::to_string(vert_coords[1]) + ", " + 
-                              std::to_string(vert_coords[2]));
+        LOG_DEBUG(false, "Vertex " << i << " (ID:" << verts[i] << ") pos: " << vert_coords[0] << ", "
+            << vert_coords[1] << ", " << vert_coords[2]);
     }
    
     // Note that if there's already a point of the same position on this object, we reuse it,
     // since we'd otherwise get a coincident point for every vertex at this point. If there's
     // no point yet in that position for this object, create one.
     PointKey lookupKey;
-    LOG_DEBUG(false, "Detail currently has " + std::to_string(objGdp->getNumVertices()) + " vertices.");
+    LOG_DEBUG(false, "Detail currently has " << objGdp->getNumVertices() << " vertices.");
     // Manually append vertices and wire them to points
     GA_Offset p_offsets[3];
     for (exint i = 0; i < 3; i++) { // cycle through vertices
         lookupKey.pos = posList[i];
-        LOG_DEBUG(false, "Got " + std::to_string(i) + "th lookup pos of {" + std::to_string(lookupKey.pos[0])
-            + ", " + std::to_string(lookupKey.pos[1]) + ", " + std::to_string(lookupKey.pos[2]) + "}");
-        LOG_DEBUG(false, "Got " + std::to_string(i) + "th lookup objID");
         auto itp = pointDict.find(lookupKey);
         if (itp != pointDict.end()) { // We already have this point
             p_offsets[i] = itp->second;
-            LOG_DEBUG(false, std::string("    We already have point ") + std::to_string(p_offsets[i]));
+            LOG_DEBUG(false, "    We already have point " << p_offsets[i]);
         } else { // We haven't seen this point yet in this copy of the object
-            LOG_DEBUG(false, "No itp entry or we haven't seen this point before in this copy of the object");
             // New point. Add it to the dictionary and set the vertex to it and set its position.
             p_offsets[i] = objGdp->appendPoint();
-            LOG_DEBUG(false, "Got p_offset " + std::to_string(p_offsets[i]) + " for new point.");
+            LOG_DEBUG(false, "Got p_offset " << p_offsets[i] << " for new point.");
             objGdp->setPos3(p_offsets[i], posList[i]);
-            LOG_DEBUG(false, "    Set the position of the point to " << posList[i] << " for position " << i);
             pointDict[lookupKey] = p_offsets[i];
-            LOG_DEBUG(false, "added offset " + std::to_string(p_offsets[i]) + " to pointDict.");
         }
         //poly->appendVertex(p_offset);
         //poly->setPointOffset(i, p_offset);
@@ -3976,7 +3964,7 @@ SOP_Read3mf::handleTriangle(XMLElement* element, int& numTriangles, const int ob
     LOG_DEBUG(false, "After bulding poly, we have " << objGdp->getNumPoints() << " points, "
         << objGdp->getNumVertices() << " vertices, and " << objGdp->getNumPrimitives() << " prims");
     obj_h.set(primOff, objID);
-    LOG_DEBUG(false, "Got " + std::to_string(primOff) + " for the prim offset.");
+    LOG_DEBUG(false, "Got " << primOff << " for the prim offset.");
 
     LOG_DEBUG(false, "We now have " << objGdp->getNumPoints() << " points, "
             << objGdp->getNumVertices() << " vertices, and " << objGdp->getNumPrimitives() << " prims");
@@ -3998,18 +3986,6 @@ SOP_Read3mf::handleTriangle(XMLElement* element, int& numTriangles, const int ob
         return ErrorCode::SUCCESS;
     }
 
-    // Assign default values for the data structures used in the operations below. 
-    PixelColor color = defaultColor;
-    bool useTexture = false;
-    bool useMulti = false;
-    std::vector<PixelColor> colorArray;    // An array of colors in a color group
-    std::vector<std::array<float, 2>> coordArray;   // An array of coordinates for a texture
-    std::vector<PixelColor> basematArray;  // An array of base material colors for a basematerial group
-    std::vector<int> multiPids; // The pids per layer of a multiproperty
-    std::vector<MultiType> multiTypes; // The type of each layer of a multiproperty
-    std::vector<std::vector<int>> multiPindices; // The list of pindices for each layer (indices into colors or coordinates)
-    std::vector<UT_StringHolder> multiShaders; // The list of shaders for each layer of a multiproperty
-
     int pid = -1; // This will be the actual value found for the groupid on the triangle in the 3mf file
     int groupID; // The index for a colorgroup, texture2dgroup, etc. -- if pid not set, this will be set to the default
 
@@ -4020,71 +3996,106 @@ SOP_Read3mf::handleTriangle(XMLElement* element, int& numTriangles, const int ob
         LOG_DEBUG(false, "No id for color or texture group so using default");
     } else {  
         groupID = pid;
-        LOG_DEBUG(false, "Triangle has pid on it, use that: " + std::to_string(pid));
+        LOG_DEBUG(false, "Triangle has pid on it, use that: " << pid);
     }
-    LOG_DEBUG(false, std::string("We have pid ") + std::to_string(pid));
-    LOG_DEBUG(false, std::string("We have groupID ") + std::to_string(groupID));
+    LOG_DEBUG(false, "We have pid " << pid);
+    LOG_DEBUG(false, "We have groupID " << groupID);
 
-    // What kind of color/texture does this triangle have if any?
-    auto itc = this->colorDict.find(groupID);
-    auto itb = this->basematDict.find(groupID);
-    auto itt = this->texture2dgroupDict.find(groupID);
-    auto itm = this->multiDict.find(groupID);
-
-/*
-    if (itt != this->texture2dgroupDict.end()) {
-        std::cerr << "We have itt key " << itt->first << std::endl;
-        const auto& sourceCoords = itt->second.coords; // Reference the source directly
-        size_t currentSize = sourceCoords.size();
-
-        // Direct printf is harder for the system to swallow than streams
-        std::cerr << "DEBUG: id=" << groupID << ", size=" << currentSize << std::endl;
-
-        if (currentSize == 0) {
-            std::cerr << "CRITICAL: Entering Error Block because size is 0" << std::endl;
-            return ErrorCode::OTHER;
-        }
-
-        // If it reaches here, size MUST be > 0
-        for (size_t i = 0; i < currentSize; ++i) {
-            // ... access logic ...
-        }
-    } else {
-        std::cerr << "We do NOT have a texture since it was at the end" << std::endl;
+    if (triangleState.caching && (triangleState.pid != pid || triangleState.groupID != groupID)) {
+        // Something has changed since the last triangle, so we can't use our cache.
+        triangleState.clear();
+        triangleState.caching = false;
     }
-*/
-    // Set the appropriate data structures depending on whether it's color/base material/texture/multiproperty.
-    if (itt != this->texture2dgroupDict.end()) { // Pick which texture2dgroup to use for the triangle
-        coordArray = itt->second.coords;
-        LOG_DEBUG(this->debug, "Size of coordArray is at first " << coordArray.size());
-        if (!coordArray.size()) {
-            std::cerr << "Error: Array of uv corrdinates for this texture group has size 0" << std::endl;
-            return ErrorCode::OTHER;
+
+    // Assign default values for the data structures used in the operations below. 
+    // Set up the triangle default color in case it is needed.
+    PixelColor defaultColor = this->objectDict[objID]->defaultColor;
+    LOG_DEBUG(false, "Got default color of " << defaultColor << " from object " << objID);
+
+    PixelColor color = defaultColor;
+    bool useTexture = false;
+    bool useMulti = false;
+    bool useBase = false;
+    std::vector<PixelColor>* colorArray;    // An array of colors in a color group
+    std::vector<std::array<float, 2>>* coordArray;   // An array of coordinates for a texture
+    UT_String texturePath; // Path to the texture.
+    std::vector<PixelColor>* basematArray;  // An array of base material colors for a basematerial group
+    std::vector<int>* multiPids; // The pids per layer of a multiproperty
+    std::vector<MultiType>* multiTypes; // The type of each layer of a multiproperty
+    std::vector<std::vector<int>>* multiPindices; // The list of pindices for each layer (indices into colors or coordinates)
+    std::vector<UT_StringHolder>* multiShaders; // The list of shaders for each layer of a multiproperty
+
+    if (triangleState.caching) { // Use the same arrays as last time
+        coordArray = triangleState.coordArray;
+        UT_String* texturePath = triangleState.texturePath;
+        colorArray = triangleState.colorArray;
+        basematArray = triangleState.basematArray;
+        multiPids = triangleState.multiPids;
+        multiTypes = triangleState.multiTypes;
+        multiPindices = triangleState.multiPindices;
+        multiShaders = triangleState.multiShaders;
+        if (coordArray) {
+            useTexture = true;
+        } else if (colorArray) {
+            // We're using color
+        } else if (basematArray) {
+            useBase = true;
+        } else if (multiPids) {
+            useMulti = true;
         }
-        for (int i = 0; i < coordArray.size(); ++i) {
-            LOG_DEBUG(this->debug, "Coordarray of " + std::to_string(i) + " is " + std::to_string(coordArray[i][0])
-                + ", " + std::to_string(coordArray[i][1]));
-        }
-        LOG_DEBUG(this->debug, "We got texture");
-        useTexture = true;
-    } else if (itc != colorDict.end()) {
-        colorArray = itc->second;
-        LOG_DEBUG(this->debug, std::string("We got color "));
-    } else if (itb != basematDict.end()) {
-        basematArray = itb->second;
-        LOG_DEBUG(this->debug, std::string("We got basemat "));
-    } else if (itm != multiDict.end()) {
-        multiPids = itm->second.multiPids;
-        multiTypes = itm->second.multiTypes;
-        multiPindices = itm->second.multiPindices;
-        multiShaders = itm->second.multiShaders;
-        LOG_DEBUG(this->debug, std::string("We got multi "));
-        useMulti = true;
-    } else if (groupID != -1) { // We were reset by something, but it's not something we recognize
-        LOG_DEBUG(this->debug, std::string("Warning: A triangle has an unknown property: ") + std::to_string(groupID)
-            + std::string(" -- assigning default color"));
-        groupID = -1; // Just use the default color, below.
-    } // Otherwise there's nothing, so we leave groupID at -1 so we get the default color
+    } else { // We're not caching, so either it's our first time for this object or something changed -- set it up again
+        // What kind of color/texture does this triangle have if any?
+        triangleState.groupID = groupID;
+        triangleState.pid = pid;
+        auto itc = this->colorDict.find(groupID);
+        auto itb = this->basematDict.find(groupID);
+        auto itt = this->texture2dgroupDict.find(groupID);
+        auto itm = this->multiDict.find(groupID);
+
+        // Set the appropriate data structures depending on whether it's color/base material/texture/multiproperty.
+        if (itt != this->texture2dgroupDict.end()) { // Pick which texture2dgroup to use for the triangle
+            coordArray = &(itt->second.coords);
+            triangleState.coordArray = coordArray;
+            LOG_DEBUG(this->debug, "Size of coordArray is at first " << coordArray->size());
+            if (!coordArray->size()) {
+                std::cerr << "Error: Array of uv corrdinates for this texture group has size 0" << std::endl;
+                return ErrorCode::OTHER;
+            }
+            for (int i = 0; i < coordArray->size(); ++i) {
+                LOG_DEBUG(this->debug, "Coordarray of " << i << " is " << (*coordArray)[i][0] << ", " << (*coordArray)[i][1]);
+            }
+            triangleState.texturePath = &(itt->second.texturePath);
+            if (triangleState.texturePath) {
+                triangleState.cachedJson = "{\"basecolor_useTexture\":1, \"basecolor_texture\":\"" + 
+                    std::string(triangleState.texturePath->buffer()) + "\"}";
+            }
+            LOG_DEBUG(this->debug, "We got texture");
+            useTexture = true;
+        } else if (itc != colorDict.end()) {
+            colorArray = &(itc->second);
+            triangleState.colorArray = colorArray;
+            LOG_DEBUG(this->debug, "We got color ");
+        } else if (itb != basematDict.end()) {
+            basematArray = &(itb->second);
+            triangleState.basematArray = basematArray;
+            LOG_DEBUG(this->debug, "We got basemat ");
+            useBase = true;
+        } else if (itm != multiDict.end()) {
+            multiPids = &(itm->second.multiPids);
+            triangleState.multiPids = multiPids;
+            multiTypes = &(itm->second.multiTypes);
+            triangleState.multiTypes = multiTypes;
+            multiPindices = &(itm->second.multiPindices);
+            triangleState.multiPindices = multiPindices;
+            multiShaders = &(itm->second.multiShaders);
+            triangleState.multiShaders = multiShaders;
+            LOG_DEBUG(this->debug, "We got multi ");
+            useMulti = true;
+        } else if (groupID != -1) { // We were reset by something, but it's not something we recognize
+            LOG_DEBUG(this->debug, "Warning: A triangle has an unknown property: " << groupID << " -- assigning default color");
+            groupID = -1; // Just use the default color, below.
+        } // Otherwise there's nothing, so we leave groupID at -1 so we get the default color
+    }
 
     // If we still haven't found a colorgroup/texture2dgroup or whatever, then force us to use 
     if (groupID == -1) {
@@ -4128,8 +4139,8 @@ SOP_Read3mf::handleTriangle(XMLElement* element, int& numTriangles, const int ob
 
     if (!useTexture && !useMulti) { // We're using color
         LOG_DEBUG(this->debug, "We are doing color");
-        if (setColorAttrs(groupID, defaultColor, colorArray, itb != basematDict.end(), basematArray,
-            poly, p1, p2, p3, Cd_h, alpha_h) != ErrorCode::SUCCESS) {
+        if (setColorAttrs(groupID, defaultColor, colorArray, useBase, basematArray, poly, p1, p2, p3, Cd_h, alpha_h)
+            != ErrorCode::SUCCESS) {
             std::cerr << "Error: Unable to set color attributes on triangle " << " for object id " << objID << std::endl;
             return ErrorCode::OTHER;
         } else {
@@ -4172,20 +4183,24 @@ SOP_Read3mf::handleTriangle(XMLElement* element, int& numTriangles, const int ob
         p3 = p1;
     }
 
-    LOG_DEBUG(this->debug, "coordArray size is " << coordArray.size());
+    LOG_DEBUG(this->debug, "coordArray size is " << coordArray->size());
 
     // coordArray contains the uvs
+    if (!coordArray) {
+        std::cerr << "Error: Our array of uv coordinates is null but mustn't be, since we have a texture." << std::endl;
+        return ErrorCode::OTHER;
+    }
     std::array<float, 2> uv1;
     std::array<float, 2> uv2;
     std::array<float, 2> uv3;
     if (this->flip) {
-        uv1 = coordArray[p3];
-        uv2 = coordArray[p2];
-        uv3 = coordArray[p1];
+        uv1 = (*coordArray)[p3];
+        uv2 = (*coordArray)[p2];
+        uv3 = (*coordArray)[p1];
     } else {
-        uv1 = coordArray[p1];
-        uv2 = coordArray[p2];
-        uv3 = coordArray[p3];
+        uv1 = (*coordArray)[p1];
+        uv2 = (*coordArray)[p2];
+        uv3 = (*coordArray)[p3];
     }
     LOG_DEBUG(this->debug, "Got the coordinates");
     /*
@@ -4230,15 +4245,15 @@ SOP_Read3mf::handleTriangle(XMLElement* element, int& numTriangles, const int ob
     }
 
     LOG_DEBUG(this->debug, "Before texturegroup thing.");
-    auto ittp = texture2dgroupDict.find(groupID);
-    if (ittp != texture2dgroupDict.end()) {
-        UT_String path = ittp->second.texturePath;
-        LOG_DEBUG(this->debug, "Got texturePath " << path);
-        std::string jsonStr = "{\"basecolor_useTexture\":1, \"basecolor_texture\":\"" + std::string(path.buffer()) + "\"}";
-        override_h.set(primOff, jsonStr.c_str());
-        LOG_DEBUG(this->debug, "Back from set");
-    } else {
-        std::cerr << "Error: No texture available for primitive -- it should already have been set." << std::endl;
+
+    // Check if we really have a texturePath. If not I'm throwing an error, but we might want instead just
+    // to continue and have no texture. If so, use this commented out line. XXXXX
+    //const char* rawPath = (triangleState.texturePath) ? triangleState.texturePath->buffer() : "";
+
+    if (!triangleState.cachedJson.empty()) {
+        override_h.set(primOff, triangleState.cachedJson.c_str());
+    } else {     // XXXX Maybe I should just let this go with no texture instead of returning an error.
+        std::cerr << "Error: Unable to set texture on the part." << std::endl;
         return ErrorCode::OTHER;
     }
 
