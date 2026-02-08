@@ -132,12 +132,27 @@ namespace HDK_Sample {
         return os;
     }
 
+    // A representation of a color useful for Houdini
+    struct PixelColor {
+        UT_Vector3 rgb; // In floats from 0.0 to 1.0
+        float a; // alpha from 0.0 to 1.0
+    };
+
+    // Overload of operator << so I can print Houdini colors easily
+    inline std::ostream& operator<<(std::ostream& os, const HDK_Sample::PixelColor& data) {
+        os << ", R: " << data.rgb[0]
+           << ", G: " << data.rgb[1]
+           << ", B: " << data.rgb[2]
+           << ", A: " << data.a;
+        
+        return os;
+    }
+
     // Information for each object in objectDict
     struct ObjectData {
         int id;
-        UT_String defaultColor;
+        PixelColor defaultColor;
         int defaultColorGroup = -1;
-        //GU_Detail* objGdp = nullptr;
         GU_DetailHandle objGdpHandle;
     };
 
@@ -217,11 +232,10 @@ namespace HDK_Sample {
         static PRM_Template myTemplateList[];
         static OP_Node*     myConstructor(OP_Network*, const char *, OP_Operator *);
 
-        static constexpr std::string_view   WHITE = "#ffffff";
-        static constexpr std::string_view   DEFAULT_COLOR = WHITE;
+        static constexpr PixelColor             WHITE = { UT_Vector3(1.0, 1.0, 1.0), 1.0f };
+        static constexpr PixelColor             DEFAULT_COLOR = WHITE;
         static constexpr int                DEFAULT_GROUP = -1;
         static constexpr std::string_view   EXTRACTFOLDER_DEFAULT = "./read3mf_Assets";
-        static constexpr UT_Vector3         DEFAULT_H_COLOR = UT_Vector3(1.0f, 1.0f, 1.0f); // White in Houdini - change if default is not white
 
     protected:
         /// Method to cook geometry for the SOP
@@ -323,14 +337,19 @@ namespace HDK_Sample {
         bool            hasMulti = false;       // Multi-properties found
         bool            hasComp = false;        // Composite material found
 
+        // Attribute handles per layer of a multiproperty
+        std::vector<GA_RWHandleV3> colorHandles;
+        std::vector<GA_RWHandleF> alphaHandles;
+        std::vector<GA_RWHandleV3> uvHandles;
+
         // key: object id, value: the object's default color and a GU_Detail for the object
         UT_Map<int, ObjectData*>                 objectDict;
 
-        // key: colorgroup id, value: array of colors in the group. The colors are represented as strings of 6 characters.
-        std::unordered_map<int, std::vector<std::string>>   colorDict;
+        // key: colorgroup id, value: array of colors in the group. The colors are 4-value (they include alpha).
+        std::unordered_map<int, std::vector<PixelColor>>   colorDict;
 
         // key: basematerials id, value: array of bases (colors) in the group
-        std::unordered_map<int, std::vector<std::string>>   basematDict;
+        std::unordered_map<int, std::vector<PixelColor>>   basematDict;
 
         // key: texture2dgroup id (pid on triangles), value: the filename for this group's texture plus the uv coord array
         std::unordered_map<int, TextureGroupData>           texture2dgroupDict;
@@ -343,8 +362,6 @@ namespace HDK_Sample {
 
         // key: id for mutliproperties, value: MultiData (includes layer ids, layer pindices, and shader paths)
         std::unordered_map<int, MultiData> multiDict;
-
-        // key: id for multiproperties, value: 
 
         // key: vertex ("point" in Houdini) number, value: array of (x,y,z) coordinates
         std::map<int, std::vector<float>>                   vertexDict;
@@ -368,10 +385,10 @@ namespace HDK_Sample {
         SOP_Read3mf::ErrorCode      handleResourcesForSubnet(tinyxml2::XMLElement* element);
         SOP_Read3mf::ErrorCode      handleResources(tinyxml2::XMLElement* element);
         SOP_Read3mf::ErrorCode      handleColorgroup(tinyxml2::XMLElement* element);
-        SOP_Read3mf::ErrorCode      handleColor(tinyxml2::XMLElement* element, std::string& color);
+        SOP_Read3mf::ErrorCode      handleColor(tinyxml2::XMLElement* element, PixelColor& color);
         SOP_Read3mf::ErrorCode      handleMultiproperties(tinyxml2::XMLElement* element);
         SOP_Read3mf::ErrorCode      handleBasematerials(tinyxml2::XMLElement* element);
-        SOP_Read3mf::ErrorCode      handleBase(tinyxml2::XMLElement* element, std::string& color);
+        SOP_Read3mf::ErrorCode      handleBase(tinyxml2::XMLElement* element, PixelColor& color);
         SOP_Read3mf::ErrorCode      handleTexture2d(tinyxml2::XMLElement* element);
         SOP_Read3mf::ErrorCode      handleTexture2dgroup(tinyxml2::XMLElement* element);
         SOP_Read3mf::ErrorCode      clampTexture(const int texid, const int groupId, std::string texturePathFs,
@@ -387,11 +404,16 @@ namespace HDK_Sample {
         SOP_Read3mf::ErrorCode      handleVertices(tinyxml2::XMLElement* element, int& numVertices, const int objID);
         SOP_Read3mf::ErrorCode      handleTriangles(tinyxml2::XMLElement* element, int& numTriangles, const int objID);
         SOP_Read3mf::ErrorCode      handleTriangle(tinyxml2::XMLElement* element, int& numTriangles, const int objID,
-            GU_Detail* objGdp, UT_Map<PointKey, GA_Offset>& pointDict, GA_RWHandleID obj_h, GA_RWHandleV3 Cd_h,
-            GA_RWHandleV3 UV_h, GA_RWHandleS material_h, GA_RWHandleS override_h);
+            GU_Detail* objGdp, UT_Map<PointKey, GA_Offset>& pointDict, GA_RWHandleID& obj_h, GA_RWHandleV3& Cd_h,
+            GA_RWHandleF& alpha_h, GA_RWHandleV3& UV_h, GA_RWHandleS& material_h, GA_RWHandleS& override_h);
         SOP_Read3mf::ErrorCode      clearData();
-        SOP_Read3mf::ErrorCode      colorFromTexture(const TextureGroupData &textureData, int pindex, std::string& returnColor);
-        SOP_Read3mf::ErrorCode      colorFromMulti(const MultiData &multiData, int pindex, std::string& returnColor);
+        PixelColor                  convertHexStringToPixelColor(const std::string& hex_string);
+        SOP_Read3mf::ErrorCode      colorFromTexture(const TextureGroupData &textureData, int pindex, PixelColor& returnColor);
+        SOP_Read3mf::ErrorCode      colorFromMulti(const MultiData &multiData, int pindex, PixelColor& returnColor);
+        SOP_Read3mf::ErrorCode      createMultiLayerAttrs();
+        SOP_Read3mf::ErrorCode      setColorAttrs(const int groupID, const PixelColor& defaultColor,
+            const std::vector<PixelColor>& colorArray, const bool useBase, const std::vector<PixelColor>& basematArray,
+            GU_PrimPoly *poly, const int p1, const int p2, const int p3, GA_RWHandleV3& Cd_h, GA_RWHandleF& alpha_h);
     };
 } // End HDK_Sample namespace
 
