@@ -76,14 +76,33 @@ namespace HDK_Sample {
         TEXTURE     // texture group
     };
 
+    // Trio of possible attribute handles we might need per layer
+    struct AttrTrio {
+        GA_RWHandleV3 Cd_h;
+        GA_RWHandleF alpha_h;
+        GA_RWHandleV2 UV_h;
+    };
+
+    // Overload of operator << so I can print the attribute handle validity easily
+    inline std::ostream& operator<<(std::ostream& os, const HDK_Sample::AttrTrio& data) {
+        os << "(Cd_h: " << (data.Cd_h.isValid() ? "yes " : "no, ")
+           << "alpha_h: " << (data.alpha_h.isValid() ? "yes " : "no, ")
+           << "UV_h: " << (data.UV_h.isValid() ? "yes " : "no")
+           << ")";
+        
+        return os;
+    }
+
     // Information for each group of multi-properties
-        struct MultiData {
+    struct MultiData {
         int id; // resource group id
         std::vector<int> multiPids; // list of resource ids for colorgroups, texture2dgroups, etc. for the different layers
         std::vector<MultiType> multiTypes; // list of what type each layer is for (color, base, texture)
         std::vector<std::vector<int>> multiPindices; // pindices into each layer group
         //std::vector<UT_String> multiShaders; // list of shader node paths one per layer
         std::vector<UT_StringHolder> multiShaders; // list of shader nodes one per layer
+        std::vector<AttrTrio> attrHandles; // Attribute handles -- we'll need at least one of them per layer
+        UT_StringHolder lastShader; // Path to the shader for the last layer -- the one we'll use for the material
     };
 
     // Overload of operator << so I can print maps with MultiData in them
@@ -122,12 +141,21 @@ namespace HDK_Sample {
         }
         os << "]";
 
+        // Print attribute handle validity
+        os << ", Attr Handle Validity: [";
+        for (size_t i = 0; i < data.attrHandles.size(); ++i) {
+            os << data.attrHandles[i];
+        }
+        os << "]";
+
         // Print multiShaders (UT_String needs .buffer() or .toStdString())
         os << ", Shaders: [";
         for (size_t i = 0; i < data.multiShaders.size(); ++i) {
             os << data.multiShaders[i].buffer() << (i == data.multiShaders.size() - 1 ? "" : ", ");
         }
         os << "]";
+
+        os << ", Last: " << data.lastShader;
         
         return os;
     }
@@ -140,10 +168,11 @@ namespace HDK_Sample {
 
     // Overload of operator << so I can print Houdini colors easily
     inline std::ostream& operator<<(std::ostream& os, const HDK_Sample::PixelColor& data) {
-        os << ", R: " << data.rgb[0]
+        os << "(R: " << data.rgb[0]
            << ", G: " << data.rgb[1]
            << ", B: " << data.rgb[2]
-           << ", A: " << data.a;
+           << ", A: " << data.a
+           << ")";
         
         return os;
     }
@@ -298,6 +327,8 @@ namespace HDK_Sample {
             std::vector<MultiType>* multiTypes = nullptr; // The type of each layer of a multiproperty
             std::vector<std::vector<int>>* multiPindices = nullptr; // The list of pindices for each layer (indices into colors or coordinates)
             std::vector<UT_StringHolder>* multiShaders = nullptr; // The list of shaders for each layer of a multiproperty
+            std::vector<AttrTrio>* attrHandles = nullptr; // We'll need at least one attr handle per layer
+            UT_StringHolder lastShader; // Full path of the last shader in the stack -- the one we'll use for the material
             std::string cachedJson = "";
 
             void clear() {
@@ -312,7 +343,17 @@ namespace HDK_Sample {
                 multiTypes = nullptr;
                 multiPindices = nullptr;
                 multiShaders = nullptr;
+                attrHandles = nullptr;
                 cachedJson.clear();
+                lastShader.clear();
+            }
+
+            // Overload for TriangleState
+            friend std::ostream& operator<<(std::ostream& os, const TriangleState& data) {
+                os << "{Caching: " << data.caching 
+                   << ", pid: " << data.pid
+                   << ", groupID: " << data.groupID << "}";
+                return os;
             }
         };
 
@@ -367,11 +408,6 @@ namespace HDK_Sample {
         bool            hasBase = false;        // Base material found
         bool            hasMulti = false;       // Multi-properties found
         bool            hasComp = false;        // Composite material found
-
-        // Attribute handles per layer of a multiproperty
-        std::vector<GA_RWHandleV3> colorHandles;
-        std::vector<GA_RWHandleF> alphaHandles;
-        std::vector<GA_RWHandleV3> uvHandles;
 
         // key: object id, value: the object's default color and a GU_Detail for the object
         UT_Map<int, ObjectData*>                 objectDict;
@@ -442,10 +478,10 @@ namespace HDK_Sample {
         PixelColor                  convertHexStringToPixelColor(const std::string& hex_string);
         SOP_Read3mf::ErrorCode      colorFromTexture(const TextureGroupData &textureData, int pindex, PixelColor& returnColor);
         SOP_Read3mf::ErrorCode      colorFromMulti(const MultiData &multiData, int pindex, PixelColor& returnColor);
-        SOP_Read3mf::ErrorCode      createMultiLayerAttrs();
-        SOP_Read3mf::ErrorCode      setColorAttrs(const int groupID, const PixelColor& defaultColor,
+        SOP_Read3mf::ErrorCode      setColorAttrs(GU_Detail* objGdp, const int groupID, const PixelColor& defaultColor,
             const std::vector<PixelColor>* colorArray, const bool useBase, const std::vector<PixelColor>* basematArray,
             GU_PrimPoly *poly, const int p1, const int p2, const int p3, GA_RWHandleV3& Cd_h, GA_RWHandleF& alpha_h);
+        SOP_Read3mf::ErrorCode      bindAttrHandles(GU_Detail* objGdp);
     };
 } // End HDK_Sample namespace
 
