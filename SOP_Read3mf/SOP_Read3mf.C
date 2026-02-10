@@ -494,7 +494,7 @@ SOP_Read3mf::convertHexStringToPixelColor(const std::string& hex_string) {
 // coordinate.
 //
 SOP_Read3mf::ErrorCode
-colormap(std::string texturePath, const std::array<float, 2>& uv, PixelColor& color, bool debug) {
+colormap(std::string texturePath, const UT_Vector2& uv, PixelColor& color, bool debug) {
     LOG_DEBUG(debug, "Entering colormap.");
 
     int width, height, numChannels;
@@ -1234,8 +1234,6 @@ SOP_Read3mf::setColorAttrs(GU_Detail* objGdp, const int groupID, const PixelColo
         LOG_DEBUG(true, "p1: " << p1 << " p2: " << p2 << " p3: " << p3 << " poly: " << poly);
     }
 
-    LOG_DEBUG(this->debug, "Got past useBase test");
-
     if (!Cd_h.isValid()) {
         std::cerr << "Color attribute handle is no longer valid" << std::endl;
         return ErrorCode::OTHER;
@@ -1276,24 +1274,24 @@ SOP_Read3mf::setColorAttrs(GU_Detail* objGdp, const int groupID, const PixelColo
         LOG_DEBUG(this->debug, "Got global vtx offset" << global_vtx_off);
 
 
-        // 1. Verify the poly pointer isn't garbage
+        // Verify the poly pointer isn't garbage
         if (!poly) {
             std::cerr << "Poly pointer is NULL inside setColorAttrs" << std::endl;
             return false;
         }
 
-        // 2. Verify the offset is actually valid for this geometry
+        // Verify the offset is actually valid for this geometry
         if (global_vtx_off < 0 || global_vtx_off >= objGdp->getVertexMap().indexSize()) {
-            std::cerr << "CRITICAL: Offset " << global_vtx_off 
+            std::cerr << "Error: Offset " << global_vtx_off 
                       << " is out of bounds for Vertex Map size " 
                       << objGdp->getVertexMap().indexSize() << std::endl;
             std::cerr << "Total Primitives in GDP: " << objGdp->getNumPrimitives() << std::endl;
             return false;
         }
 
-        // 3. Check if the handle is still 'connected' to this specific gdp
+        // Check if the handle is still 'connected' to this specific gdp
         if (&Cd_h.getAttribute()->getIndexMap().getDetail() != objGdp) {
-            std::cerr << "CRITICAL: Handle belongs to a different Detail!" << std::endl;
+            std::cerr << "Error: Handle belongs to a different detail!" << std::endl;
             return false;
         }
 
@@ -1317,6 +1315,108 @@ SOP_Read3mf::setColorAttrs(GU_Detail* objGdp, const int groupID, const PixelColo
     }
 
     LOG_DEBUG(this->debug, "Exiting setColorAttrs");
+    return ErrorCode::SUCCESS;
+}
+
+
+//
+// Set the coordinate/texture attributes on the vertices of a triangle.
+//
+SOP_Read3mf::ErrorCode
+SOP_Read3mf::setTextureAttrs(GU_Detail* objGdp, const int groupID, const std::vector<UT_Vector2>* coordArray,
+    GU_PrimPoly *poly, const int p1, const int p2, const int p3, GA_RWHandleV2& UV_h){
+
+    LOG_DEBUG(this->debug, "Entering setTextureAttrs");
+
+    if (this->debug) {
+        LOG_DEBUG(true, "We have groupID " << groupID);
+        if (!coordArray) {
+            LOG_DEBUG(true, "coordArray is NULL");
+        } else {
+            LOG_DEBUG(true, "coordArray size: " << coordArray->size());
+            LOG_DEBUG(true, "Contents: " << *coordArray); 
+        }
+        LOG_DEBUG(true, "p1: " << p1 << " p2: " << p2 << " p3: " << p3 << " poly: " << poly);
+    }
+
+    if (!UV_h.isValid()) {
+        std::cerr << "UV attribute handle is no longer valid" << std::endl;
+        return ErrorCode::OTHER;
+    }
+
+    /* I'm not sure I need this
+    if (p1 == -1) {
+        // Assign default object property: ToDo XXX
+        ;
+    }
+    if (p2 == -1) {
+        p2 = p1;
+    }
+    if (p3 == -1) {
+        p3 = p1;
+    }
+    */
+
+    // lambda function to avoid writing this 3 times for 3 vertices
+    // coordArray should not be null given how we're called, but just in case, I check for that
+    auto assign_vertex_coords = [&](int local_vtx_idx, int index_p) -> bool {
+        UT_Vector2 coords;
+        if (groupID == -1 || index_p == -1) {
+            // XXXXX assign default texture: TODO
+            LOG_DEBUG(true, "Warning: in setTextureAttrs, groupID and index_p -1 so should assign default but I don't do that yet");
+            return false;
+        }
+        if (coordArray && !coordArray->empty() && coordArray->size() >= (size_t) index_p + 1) {
+            coords[0] = (*coordArray)[index_p][0];
+            coords[1] = (*coordArray)[index_p][1];
+            LOG_DEBUG(false, "texture");
+        } else {
+            LOG_DEBUG(true, "Warning: in setTextureAttrs, coordArray is bad so should assign default but I don't do that yet");
+            return false;
+        }
+
+        LOG_DEBUG(this->debug, "About to get global poly vertex -- have coords [" << coords[0] << ", " << coords[1]);
+        GA_Offset global_vtx_off = poly->getVertexOffset(local_vtx_idx);
+        LOG_DEBUG(this->debug, "Got global vtx offset" << global_vtx_off);
+
+
+        // Verify the poly pointer isn't garbage
+        if (!poly) {
+            std::cerr << "Poly pointer is NULL inside setColorAttrs" << std::endl;
+            return false;
+        }
+
+        // Verify the offset is actually valid for this geometry
+        if (global_vtx_off < 0 || global_vtx_off >= objGdp->getVertexMap().indexSize()) {
+            std::cerr << "Error: Offset " << global_vtx_off 
+                      << " is out of bounds for Vertex Map size " 
+                      << objGdp->getVertexMap().indexSize() << std::endl;
+            std::cerr << "Total Primitives in GDP: " << objGdp->getNumPrimitives() << std::endl;
+            return false;
+        }
+
+        // Check if the handle is still 'connected' to this specific gdp
+        if (&UV_h.getAttribute()->getIndexMap().getDetail() != objGdp) {
+            std::cerr << "Error: Handle belongs to a different detail!" << std::endl;
+            return false;
+        }
+
+        UV_h.set(global_vtx_off, coords);
+        LOG_DEBUG(this->debug, "Did set with coords " << coords);
+        return true;
+    };
+
+    if (this->flip) { // Where to flip what is a little puzzling. It appears we need to do so again.
+        if (!assign_vertex_coords(0, p3) || !assign_vertex_coords(1, p2) || !assign_vertex_coords(2, p1)) {
+            return ErrorCode::OTHER;
+        }
+    } else {
+        if (!assign_vertex_coords(0, p1) || !assign_vertex_coords(1, p2) || !assign_vertex_coords(2, p3)) {
+            return ErrorCode::OTHER;
+        }
+    }
+
+    LOG_DEBUG(this->debug, "Exiting setTextureAttrs");
     return ErrorCode::SUCCESS;
 }
 
@@ -2401,7 +2501,7 @@ SOP_Read3mf::handleTexture2dgroup(tinyxml2::XMLElement* element) {
 
     LOG_DEBUG(false, "maxU " << maxU << " maxV " << maxV << " minU " << minU << " minV " << minV);
 
-    std::vector<std::array<float, 2>> arrayOfCoords;
+    std::vector<UT_Vector2> arrayOfCoords;
     arrayOfCoords.reserve(coordCount); // Do this all at once to avoid repeated allocations & memory fragmenting
     LOG_DEBUG(false, "Reserved " << coordCount << " items of memory in arrayOfCoords");
     texture2dgroupDict[id].texturePath = textureFile; // The original file -- but it might get overwritten by clamping
@@ -3238,14 +3338,14 @@ SOP_Read3mf::colorFromTexture(const TextureGroupData &textureData, int pindex, P
     std::string texturePathFs;
     texturePathFs = textureData.texturePath; 
 
-    std::vector<std::array<float, 2>> coordArray = textureData.coords;
+    std::vector<UT_Vector2> coordArray = textureData.coords;
     if (coordArray.size() <= pindex || pindex < 0) {
         std::cerr << "Error: Index into array of texture coordinates is out of bounds." << std::endl;
         LOG_DEBUG(false, "pindex is " << pindex << " and size of coordArray is " << coordArray.size());
         return ErrorCode::BAD_3MF;
     }
-    const std::array<float, 2> uvcoords = coordArray[pindex];
-    LOG_DEBUG(false, "In handle object we got default texture coords of [" << uvcoords[0] << ", " << uvcoords[1] << "]");
+    const UT_Vector2 uvcoords = coordArray[pindex];
+    LOG_DEBUG(false, "In handle object we got default texture coords of [" << uvcoords);
     
     if (colormap(texturePathFs, uvcoords, returnColor, this->debug) != ErrorCode::SUCCESS) {
         std::cerr << "Unable to get color of pixel in default texture for an object " << std::endl;
@@ -3294,7 +3394,7 @@ SOP_Read3mf::colorFromMulti(const MultiData &multiData, int pindex, PixelColor &
             TextureGroupData textureInfo = texture2dgroupDict[pid];
             PixelColor color;
             UT_String texturePath = textureInfo.texturePath;
-            std::vector<std::array<float, 2>> coords = textureInfo.coords;
+            std::vector<UT_Vector2> coords = textureInfo.coords;
             LOG_DEBUG(this->debug, "and we have texture info " << textureInfo);
             if (colorFromTexture(textureInfo, index, color) != ErrorCode::SUCCESS) {
                 std::cerr << "Error: Could not get color from texture pixel" << std::endl;
@@ -4095,7 +4195,7 @@ SOP_Read3mf::handleTriangle(XMLElement* element, int& numTriangles, const int ob
     bool useMulti = false;
     bool useBase = false;
     std::vector<PixelColor>* colorArray = nullptr;    // An array of colors in a color group
-    std::vector<std::array<float, 2>>* coordArray = nullptr;   // An array of coordinates for a texture
+    std::vector<UT_Vector2>* coordArray = nullptr;   // An array of coordinates for a texture
     //UT_String* texturePath = nullptr; // Path to the texture. // We no longer use a free variable for this -- just triangleState
     std::vector<PixelColor>* basematArray = nullptr;  // An array of base material colors for a basematerial group
     std::vector<int>* multiPids = nullptr; // The pids per layer of a multiproperty
@@ -4319,7 +4419,10 @@ SOP_Read3mf::handleTriangle(XMLElement* element, int& numTriangles, const int ob
                     return ErrorCode::OTHER;
                 }
                 coordArray = &(this->texture2dgroupDict[(*multiPids)[i]].coords);   // An array of coordinates for a texture
-
+                if (setTextureAttrs(objGdp, groupID, coordArray, poly, p1, p2, p3, (*attrHandles)[i].UV_h) != ErrorCode::SUCCESS) {
+                    std::cerr << "Error: Unable to set multi base color attributes on triangle " << " for object id " << objID << std::endl;
+                    return ErrorCode::OTHER;
+                }
                 LOG_DEBUG(this->debug, "texture cycle");
             } else {
                 std::cerr << "Error: Unknown type of multiproperty on a layer." << std::endl;
@@ -4344,6 +4447,7 @@ SOP_Read3mf::handleTriangle(XMLElement* element, int& numTriangles, const int ob
     LOG_DEBUG(this->debug, "Entering texture section we have p1 "<< p1 << ", p2 " << p2 << ", p3 " << p3
         << " and default color " << defaultColor);
 
+    /* I'm not sure I need this
     if (p1 == -1) {
         // Assign default object property: ToDo XXX
         ;
@@ -4354,6 +4458,7 @@ SOP_Read3mf::handleTriangle(XMLElement* element, int& numTriangles, const int ob
     if (p3 == -1) {
         p3 = p1;
     }
+    */
 
     LOG_DEBUG(this->debug, "coordArray size is " << coordArray->size());
 
@@ -4362,9 +4467,9 @@ SOP_Read3mf::handleTriangle(XMLElement* element, int& numTriangles, const int ob
         std::cerr << "Error: Our array of uv coordinates is null but mustn't be, since we have a texture." << std::endl;
         return ErrorCode::OTHER;
     }
-    std::array<float, 2> uv1;
-    std::array<float, 2> uv2;
-    std::array<float, 2> uv3;
+    UT_Vector2 uv1;
+    UT_Vector2 uv2;
+    UT_Vector2 uv3;
     if (this->flip) {
         uv1 = (*coordArray)[p3];
         uv2 = (*coordArray)[p2];

@@ -302,7 +302,7 @@ namespace HDK_Sample {
         
         struct TextureGroupData {
             UT_String texturePath;
-            std::vector<std::array<float, 2>> coords;
+            std::vector<UT_Vector2> coords;
             int originalTexId; // Useful for debugging, but not kept up-to-date in TriangleState!
 
             // Overload for TextureGroupData
@@ -320,7 +320,7 @@ namespace HDK_Sample {
             int pid = -1;
             int groupID = -1;
             std::vector<PixelColor>* colorArray = nullptr;    // An array of colors in a color group
-            std::vector<std::array<float, 2>>* coordArray = nullptr;   // An array of coordinates for a texture
+            std::vector<UT_Vector2>* coordArray = nullptr;   // An array of coordinates for a texture
             UT_String* texturePath = nullptr; // Path to the texture
             std::vector<PixelColor>* basematArray = nullptr;  // An array of base material colors for a basematerial group
             std::vector<int>* multiPids = nullptr; // The pids per layer of a multiproperty
@@ -481,6 +481,8 @@ namespace HDK_Sample {
         SOP_Read3mf::ErrorCode      setColorAttrs(GU_Detail* objGdp, const int groupID, const PixelColor& defaultColor,
             const std::vector<PixelColor>* colorArray, const bool useBase, const std::vector<PixelColor>* basematArray,
             GU_PrimPoly *poly, const int p1, const int p2, const int p3, GA_RWHandleV3& Cd_h, GA_RWHandleF& alpha_h);
+        SOP_Read3mf::ErrorCode      setTextureAttrs(GU_Detail* objGdp, const int groupID, const std::vector<UT_Vector2>* coordArray,
+            GU_PrimPoly *poly, const int p1, const int p2, const int p3, GA_RWHandleV2& UV_h);
         SOP_Read3mf::ErrorCode      bindAttrHandles(GU_Detail* objGdp);
     };
 } // End HDK_Sample namespace
