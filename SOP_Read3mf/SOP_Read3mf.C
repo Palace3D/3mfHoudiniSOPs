@@ -835,6 +835,51 @@ writeNewTexture(std::string dir, std::string stem, std::string suffix, std::stri
 
 
 //
+// Write out a version of a texture with opaque alpha.
+//
+bool
+writeOpaqueTexture(std::string dir, std::string stem, std::string suffix, std::string addition,
+    int width, int height, int numChannels, unsigned char* imagePtr, int rowStride, std::string &newPath, bool debug) {
+
+    LOG_DEBUG(debug, "Entering writeOpaqueTexture with dir " + dir + " and addition " + addition + " width "
+        + std::to_string(width) + " height " + std::to_string(height) + " rowStride " + std::to_string(rowStride));
+
+    std::string newFilePath;    
+    int success = 0;
+    if (numChannels == 4) {
+        if (strcmp(suffix.c_str(), ".png") != 0 && strcmp(suffix.c_str(), ".PNG") != 0) {
+            std::cerr << "Warning: changing texture from " + suffix + " to .png to accommodate alpha channel." << std::endl;
+        }
+        // create name of new texture file
+        newFilePath = dir + "/" + stem + addition + ".png";
+        // Use stbi_write_png for RGBA (handles alpha)
+        success = stbi_write_png(newFilePath.c_str(), width, height, numChannels, imagePtr, rowStride);
+    } else {
+        if (strcmp(suffix.c_str(), ".jpg") != 0 && strcmp(suffix.c_str(), ".JPG") != 0 && strcmp(suffix.c_str(), ".jpeg") != 0
+            && strcmp(suffix.c_str(), ".JPEG") != 0) {
+            std::cerr << "Warning: changing texture from " + suffix
+                + " to .jpg since we lack an alpha channel and this gives us more compression." << std::endl;
+        }
+        // create name of new texture file
+        newFilePath = dir + "/" + stem + addition + ".jpg";
+        // Use stbi_write_jpg for RGB (if numChannels=3)
+        success = stbi_write_jpg(newFilePath.c_str(), width, height, numChannels, imagePtr, 90); // 90 is jpg quality
+    }
+
+    if (!success) {
+        std::cerr << "Error writing new image to: " << newFilePath << std::endl;
+        return false;
+    }
+    newPath = newFilePath;
+
+    LOG_DEBUG(debug, "Exiting writeOpaqueTexture");
+
+    return true;
+}
+
+
+
+//
 // Convert texture to a 2-way tiling mirrored in both U and V and write it to
 // a new texture file. In stbi, the top left corner of the image is (0,0). In Houdini, it is
 // the bottom left corner that is (0,0). Because the memory storage order is inverted relative to the
@@ -1202,13 +1247,65 @@ SOP_Read3mf::matnetOverrideSetup() {
     return;
 }
 
+//
+// Take a texture and write out a new texture where all pixels have alpha 1.0f.
+//
+SOP_Read3mf::ErrorCode
+SOP_Read3mf::makeOpaqueTexture(exint groupID, std::string texturePath, std::string& newPath) {
+    int width, height, channels;
+    std::string dir;
+    std::string stem;
+    std::string suffix;
+
+    LOG_DEBUG(this->debug, "Entering makeOpaqueTexture");
+
+    LOG_DEBUG(this->debug, "groupID: " << groupID << ", texturePath: " << texturePath);
+    
+    // Do we have to create the file first?
+    if (!texture2dgroupDict[groupID].opaquePath) { // We already know the texture dict has an entry for this groupID
+        getFileInfo(texturePath, dir, stem, suffix);
+
+        // Load the image but forcing 4 channels to ensure we have an alpha channel
+        unsigned char* data = stbi_load(texturePath.c_str(), &width, &height, &channels, 4);
+
+        if (data == nullptr) {
+            std::cerr << "Error: Failed to load image for changing alpha to 1.0" << std::endl;
+            return ErrorCode::OTHER;
+        }
+
+        // Iterate through pixels and set Alpha to 255 (fully opaque)
+        // The data is arranged as [R, G, B, A, R, G, B, A...]
+        int pixel_count = width * height;
+        for (int i = 0; i < pixel_count; i++) {
+            // The alpha channel is at index (i * 4) + 3
+            data[i * 4 + 3] = 255; 
+        }
+
+        if (!writeNewTexture(dir, stem, ".png", "Opaque", width, height, 4, data, width * 4, newPath, this->debug)) {
+            std::cerr << "Error: Unable to write out opaque texture file" << std::endl;
+            stbi_image_free(data);
+            return ErrorCode::OTHER;
+        }
+        stbi_image_free(data);
+        texture2dgroupDict[groupID].opaquePath = newPath;
+        
+        LOG_DEBUG(this->debug, "Rewrote texture " <<  " as opaque texture " << newPath);
+    } else {
+        newPath = texture2dgroupDict[groupID].opaquePath; // There already is one, so use it
+    }
+    LOG_DEBUG(this->debug, "newPath is " << newPath);
+    LOG_DEBUG(this->debug, "Exiting makeOpaqueTexture");
+
+    return ErrorCode::SUCCESS;
+}
+
 
 //
 // Set the color attributes on the vertices of a triangle.
 //
 SOP_Read3mf::ErrorCode
 SOP_Read3mf::setColorAttrs(GU_Detail* objGdp, const int groupID, const PixelColor& defaultColor, const std::vector<PixelColor>* colorArray,
-    const bool useBase, const std::vector<PixelColor>* basematArray,
+    bool opaque, const bool useBase, const std::vector<PixelColor>* basematArray,
     GU_PrimPoly *poly, const int p1, const int p2, const int p3, GA_RWHandleV3& Cd_h, GA_RWHandleF& alpha_h) {
     LOG_DEBUG(this->debug, "Entering setColorAttrs");
     // The pindices choose a color for this point
@@ -1261,13 +1358,16 @@ SOP_Read3mf::setColorAttrs(GU_Detail* objGdp, const int groupID, const PixelColo
         } else {
             if (colorArray && !colorArray->empty() && colorArray->size() >= (size_t) index_p + 1) {
                 color = (*colorArray)[index_p];
-                LOG_DEBUG(false, "color");
+                LOG_DEBUG(this->debug, "color from array " << color);
             } else {
                 color = defaultColor;
-                LOG_DEBUG(false, "color default");
+                LOG_DEBUG(false, "color default " << color);
             }
         }
         float alpha = color.a;
+        if (opaque) {
+            alpha = 1.0f;
+        }
         UT_Vector3 aColor = color.rgb;
         LOG_DEBUG(this->debug, "About to get global poly vertex -- have color " << aColor << " and alpha " << alpha);
         GA_Offset global_vtx_off = poly->getVertexOffset(local_vtx_idx);
@@ -1320,11 +1420,13 @@ SOP_Read3mf::setColorAttrs(GU_Detail* objGdp, const int groupID, const PixelColo
 
 
 //
-// Set the coordinate/texture attributes on the vertices of a triangle.
+// Set the coordinate/texture attributes on the vertices of a triangle. Also, if opaque is true, rewrite the texture
+// with alpha=1 on all pixels. We rewrite to a new file name since the texture might be in use elsewhere where we
+// want to maintain its transparency.
 //
 SOP_Read3mf::ErrorCode
 SOP_Read3mf::setTextureAttrs(GU_Detail* objGdp, const int groupID, const std::vector<UT_Vector2>* coordArray,
-    GU_PrimPoly *poly, const int p1, const int p2, const int p3, GA_RWHandleV2& UV_h){
+    GU_PrimPoly *poly, const int p1, const int p2, const int p3, GA_RWHandleV2& UV_h) {
 
     LOG_DEBUG(this->debug, "Entering setTextureAttrs");
 
@@ -1339,11 +1441,24 @@ SOP_Read3mf::setTextureAttrs(GU_Detail* objGdp, const int groupID, const std::ve
         LOG_DEBUG(true, "p1: " << p1 << " p2: " << p2 << " p3: " << p3 << " poly: " << poly);
     }
 
+    // UV_h sanity checks
     if (!UV_h.isValid()) {
         std::cerr << "UV attribute handle is no longer valid" << std::endl;
         return ErrorCode::OTHER;
     }
 
+    // Check if the handle is still 'connected' to this specific gdp -- maybe can get rid of this XXXXX
+    if (&UV_h.getAttribute()->getIndexMap().getDetail() != objGdp) {
+        std::cerr << "Error: Handle belongs to a different detail!" << std::endl;
+        return ErrorCode::OTHER;
+    }
+
+    // Verify the poly pointer isn't garbage
+    if (!poly) {
+        std::cerr << "Poly pointer is NULL inside setColorAttrs" << std::endl;
+        return ErrorCode::OTHER;
+    }
+    
     /* I'm not sure I need this
     if (p1 == -1) {
         // Assign default object property: ToDo XXX
@@ -1356,6 +1471,8 @@ SOP_Read3mf::setTextureAttrs(GU_Detail* objGdp, const int groupID, const std::ve
         p3 = p1;
     }
     */
+
+    // XXXXX I think I can get rid of some of the many checks done below. Mostly they were for debugging.
 
     // lambda function to avoid writing this 3 times for 3 vertices
     // coordArray should not be null given how we're called, but just in case, I check for that
@@ -1379,13 +1496,6 @@ SOP_Read3mf::setTextureAttrs(GU_Detail* objGdp, const int groupID, const std::ve
         GA_Offset global_vtx_off = poly->getVertexOffset(local_vtx_idx);
         LOG_DEBUG(this->debug, "Got global vtx offset" << global_vtx_off);
 
-
-        // Verify the poly pointer isn't garbage
-        if (!poly) {
-            std::cerr << "Poly pointer is NULL inside setColorAttrs" << std::endl;
-            return false;
-        }
-
         // Verify the offset is actually valid for this geometry
         if (global_vtx_off < 0 || global_vtx_off >= objGdp->getVertexMap().indexSize()) {
             std::cerr << "Error: Offset " << global_vtx_off 
@@ -1395,14 +1505,10 @@ SOP_Read3mf::setTextureAttrs(GU_Detail* objGdp, const int groupID, const std::ve
             return false;
         }
 
-        // Check if the handle is still 'connected' to this specific gdp
-        if (&UV_h.getAttribute()->getIndexMap().getDetail() != objGdp) {
-            std::cerr << "Error: Handle belongs to a different detail!" << std::endl;
-            return false;
-        }
-
         UV_h.set(global_vtx_off, coords);
         LOG_DEBUG(this->debug, "Did set with coords " << coords);
+
+
         return true;
     };
 
@@ -1415,7 +1521,7 @@ SOP_Read3mf::setTextureAttrs(GU_Detail* objGdp, const int groupID, const std::ve
             return ErrorCode::OTHER;
         }
     }
-
+    
     LOG_DEBUG(this->debug, "Exiting setTextureAttrs");
     return ErrorCode::SUCCESS;
 }
@@ -2505,7 +2611,7 @@ SOP_Read3mf::handleTexture2dgroup(tinyxml2::XMLElement* element) {
     arrayOfCoords.reserve(coordCount); // Do this all at once to avoid repeated allocations & memory fragmenting
     LOG_DEBUG(false, "Reserved " << coordCount << " items of memory in arrayOfCoords");
     texture2dgroupDict[id].texturePath = textureFile; // The original file -- but it might get overwritten by clamping
-    texture2dgroupDict[id].texturePath.harden();
+    // texture2dgroupDict[id].texturePath.harden(); // Changed this to UT_StringHolder so no need to harden
     LOG_DEBUG(false, "set texture2dgroupDict of id " << id << " to " << textureFile);
     texture2dgroupDict[id].originalTexId = texid;
 
@@ -2518,7 +2624,7 @@ SOP_Read3mf::handleTexture2dgroup(tinyxml2::XMLElement* element) {
             return ErrorCode::OTHER;
         }
         texture2dgroupDict[id].texturePath = textureFile; // overwrite with name of new texture file from clamping
-        texture2dgroupDict[id].texturePath.harden();
+        //texture2dgroupDict[id].texturePath.harden(); // Changed to UT_StringHolder so no need to harden
         LOG_DEBUG(false, "Returned from clamp and set texture2dgroupDict of  id " << id << " to " << textureFile);
     }
 
@@ -2889,6 +2995,12 @@ SOP_Read3mf::bindAttrHandles(GU_Detail* objGdp) {
             multiData.attrHandles[i].UV_h.bind(uvAttr);
             LOG_DEBUG(this->debug, "Bound the handle for " << attrUVName);
 
+            UT_String attrTextureName;
+            attrTextureName.sprintf("basecolor_texture_%d_%d", groupID, i);
+            GA_Attribute* textureAttr = objGdp->addStringTuple(GA_ATTRIB_PRIMITIVE, attrTextureName, 1);
+            multiData.attrHandles[i].texture_h.bind(textureAttr);
+            LOG_DEBUG(this->debug, "Bound the handle for " << attrTextureName);
+
             LOG_DEBUG(this->debug, "For layer " << i << " we have " << multiData.attrHandles[i]);
         }
     }
@@ -2953,8 +3065,10 @@ SOP_Read3mf::handleMultiproperties(XMLElement* element) {
 
     LOG_DEBUG(this->debug, "stop 4");
 
-    // Cycle through the layers list creating shaders. For colorgroup ids we'll fill in the basecolor on the
-    // shader later. For texture2dgroup ids we'll set the basecolor to white and use a texture path.
+    // Cycle through the layers list creating shaders and mixers. For colorgroup ids we'll bind basecolor attributes
+    // to the shader later. For texture2dgroup ids we'll set the basecolor to white and use a texture path. We'll
+    // bind uv attributes to the shader later. We create mix nodes to mix the accumulated and new shaders together.
+    // We feed the alpha value for the mixer between layers later as well.
     // The matnet node we already created is the parent of these shaders. We also create the color and alpha
     // attribute handles and the uv handles for each layer, as needed.
     OP_Node* matnetNode = OPgetDirector()->findNode(this->matnetPath);
@@ -2962,22 +3076,25 @@ SOP_Read3mf::handleMultiproperties(XMLElement* element) {
         std::cerr << "Error: Cannot find matnet node we already made." << std::endl;
         return ErrorCode::OTHER;
     }
-    OP_Network* matnetNet = dynamic_cast<OP_Network*>(matnetNode);
-    OP_Node* previousNode;
-    bool first = true;
-    std::vector<UT_StringHolder> shaderList;
-    std::vector<MultiType> multiTypes;
-    std::vector<AttrTrio> attrHandles;
+    OP_Network* matnetNet = dynamic_cast<OP_Network*>(matnetNode); // The shaders & mixers go in this subnet
+    OP_Node* previousNode; // The accumulated shaders
+    bool first = true; // If we're doing the first layer, there are no accumulated shaders
+    std::vector<UT_StringHolder> shaderList; // full path to each layer's shader node
+    std::vector<MultiType> multiTypes; // The layer type
+    std::vector<AttrQuad> attrHandles; // space for the attr handles htat we bind to the layer later in bindAattrHandles()
+    int numColorLayers = 0; // The spec only allows one color layer in the stack
+    // The spec only allows one material layer in the stack, but it also has to be the 1st layer, so we catch that there
     LOG_DEBUG(this->debug, "There are " << layersList.size() << " layers.");
-    shaderList.reserve(layersList.size());
-    OP_Node* lastShaderNode; // This is the one we'll set for the display -- it's the last shader in the stack
-    for (size_t i = 0; i < layersList.size(); ++i) {
+    //shaderList.reserve(layersList.size());
+    OP_Node* lastShaderNode; // This is the one we'll use for the display -- it's the last shader in the stack
+    for (size_t i = 0; i < layersList.size(); ++i) { // cycle through the layers
         LOG_DEBUG(this->debug, "Cycle " << i);
-        int layer = layersList[i];
+        int layer = layersList[i]; // current layer
         auto itc = colorDict.find(layer);
         auto itb = basematDict.find(layer);
         auto itt = texture2dgroupDict.find(layer);
         
+        // Create the shader node
         UT_String shaderName;
         shaderName .sprintf("shader_layer_%d_%d", id, i);
         //OP_Node* shaderNode = ((OP_Network*) matnetNode)->createNode("principledshader", shaderName);
@@ -2994,8 +3111,14 @@ SOP_Read3mf::handleMultiproperties(XMLElement* element) {
         shaderList.push_back(UT_StringHolder(fullShaderPath));
         attrHandles.emplace_back();
 
-        if (itc != colorDict.end()) {
+        if (itc != colorDict.end()) { // Is this a color layer?
+            // It's a color node, so create the bind nodes for setting color and alpha attributes
             LOG_DEBUG(this->debug, "Layer " << layer << " is a color");
+            if (numColorLayers > 0) {
+                std::cerr << "Error: cannot have more than one multiproperty color layer." << std::endl;
+                return ErrorCode::OTHER;
+            }
+            ++numColorLayers;
             multiTypes.push_back(MultiType::COLOR);
             // Create a color bind VOP
             UT_String bindNameColor;
@@ -3042,7 +3165,12 @@ SOP_Read3mf::handleMultiproperties(XMLElement* element) {
                 shaderNode->setInput(alphaIdx, bindNodeAlpha, 0);
             }
             LOG_DEBUG(this->debug, "finished color layer");
-        } else if (itb != basematDict.end()) {
+        } else if (itb != basematDict.end()) { // Is this a base material layer?
+            // It's a base material node, so create the bind nodes for setting color and alpha attributes
+            if (i != 0) { // base materials can only be on the first layer
+                std::cerr << "Error: We have a base material layer in a multiproperty that is not on layer 0." << std::endl;
+                return ErrorCode::OTHER;
+            }           
             LOG_DEBUG(this->debug, "Layer " << layer << " is a basematerial");
             multiTypes.push_back(MultiType::BASE);
             // Create a color bind VOP
@@ -3090,33 +3218,52 @@ SOP_Read3mf::handleMultiproperties(XMLElement* element) {
                 shaderNode->setInput(alphaIdx, bindNodeAlpha, 0);
             }
             LOG_DEBUG(this->debug, "finished base layer");
-        } else if (itt != texture2dgroupDict.end()) {
+        } else if (itt != texture2dgroupDict.end()) { // Is this a texture layer?
             LOG_DEBUG(this->debug, "Layer " << layer << " is a texture");
             multiTypes.push_back(MultiType::TEXTURE);
             shaderNode->setFloat("basecolor", 0, 0.0, 1.0f);
             shaderNode->setFloat("basecolor", 1, 0.0, 1.0f);
             shaderNode->setFloat("basecolor", 2, 0.0, 1.0f);
             shaderNode->setInt("basecolor_useTexture", 0, 0, 1);
-            LOG_DEBUG(this->debug, "About to set texture to texture2dgroup of " << layer <<
-                " which is " << this->texture2dgroupDict[layer].texturePath.buffer());
+
+            UT_String bindTextureName;
+            bindTextureName.sprintf("multi_texture_layer_%d_%d", id, i);
+            UT_String attrTextureName;
+            attrTextureName.sprintf("basecolor_texture_%d_%d", id, i);
+            VOP_Node* bindTextureNode = (VOP_Node*)matnetNet->createNode("bind", bindTextureName);
+            if (!bindTextureNode) {
+                std::cerr << "Error: could not create bind VOP" << std::endl;
+                return ErrorCode::OTHER;
+            }
+            LOG_DEBUG(this->debug, "Created multi texture bind node");
+            // Set the attribute name string
+            bindTextureNode->setString(attrTextureName, CH_STRING_LITERAL, "parmname", 0, 0.0f);
+            // Pick type of attribute. Here I pick an image string
+            bindTextureNode->setInt("parmtype", 0, 0.0f, 17); // Menu entry 17 for image name string XXX use 15 (string) 16 (file)?
+            // Connect the Bind VOP output (0) to the Shader's basecolor_texture input
+            int textureIdx = shaderNode->getInputFromName("basecolor_texture");
+            if (textureIdx >= 0) {
+                shaderNode->setInput(textureIdx, bindTextureNode, 0);
+            }
+
+            //LOG_DEBUG(this->debug, "About to set texture to texture2dgroup of " << layer <<
+            //    " which is " << this->texture2dgroupDict[layer].texturePath.buffer());
             //shaderNode->setString("basecolor_texture", 0, 0.0, this->texture2dgroupDict[layer].texturePath.buffer());
             // Arguments: (Parameter Name, Index, Time, Value)
-            shaderNode->getParm("basecolor_texture").setValue(0.0, this->texture2dgroupDict[layer].texturePath.buffer(), 
-                CH_STRING_LITERAL);
+            //shaderNode->getParm("basecolor_texture").setValue(0.0, this->texture2dgroupDict[layer].texturePath.buffer(), 
+            //    CH_STRING_LITERAL);
+
             // create a uv bind VOP
             UT_String bindName;
             bindName.sprintf("uv_layer_%d_%d", id, i);
-
             UT_String attrName;
             attrName.sprintf("uv_%d_%d", id, i);
-
             VOP_Node* bindNode = (VOP_Node*)matnetNet->createNode("bind", bindName);
             if (!bindNode) {
                 std::cerr << "Error: could not create bind VOP" << std::endl;
                 return ErrorCode::OTHER;
             }
             LOG_DEBUG(this->debug, "Created uv bind node");
-
             // Set the attribute name string
             bindNode->setString(attrName, CH_STRING_LITERAL, "parmname", 0, 0.0f);
             // Pick type of attribute. Here I pick a 3-float attribute
@@ -3126,6 +3273,8 @@ SOP_Read3mf::handleMultiproperties(XMLElement* element) {
             if (uvIdx >= 0) {
                 shaderNode->setInput(uvIdx, bindNode, 0);
             }
+
+
         }
         if (first) {
             first = false;
@@ -3162,6 +3311,7 @@ SOP_Read3mf::handleMultiproperties(XMLElement* element) {
         //if (layerMix->getDisplay()) {
             //LOG_DEBUG(this->debug, "Yah! display set!"); // XXXXX But we're not seeing it set!
         //}
+        previousNode = layerMix;
         LOG_DEBUG(this->debug, "finished texture layer");
     }
     
@@ -3199,9 +3349,9 @@ SOP_Read3mf::handleMultiproperties(XMLElement* element) {
     }
     LOG_DEBUG(this->debug, "stop 6");
     LOG_DEBUG(this->debug, "For shader list ");
-    for (const auto &thisShader : shaderList) {
-        LOG_DEBUG(this->debug, "    SHADER " << thisShader.toStdString());
-    }
+    //for (const auto &thisShader : shaderList) {
+        //LOG_DEBUG(this->debug, "    SHADER " << thisShader.toStdString());
+    //}
 
     // --------
 
@@ -3393,7 +3543,7 @@ SOP_Read3mf::colorFromMulti(const MultiData &multiData, int pindex, PixelColor &
             LOG_DEBUG(this->debug, "For group " << pid << " it's a texture");
             TextureGroupData textureInfo = texture2dgroupDict[pid];
             PixelColor color;
-            UT_String texturePath = textureInfo.texturePath;
+            UT_StringHolder texturePath = textureInfo.texturePath;
             std::vector<UT_Vector2> coords = textureInfo.coords;
             LOG_DEBUG(this->debug, "and we have texture info " << textureInfo);
             if (colorFromTexture(textureInfo, index, color) != ErrorCode::SUCCESS) {
@@ -3917,7 +4067,8 @@ SOP_Read3mf::handleTriangles(XMLElement* element, int& numTriangles, const int o
     // keep them across objects? Will this mess up objects that already have had attributes applied? XXXXX
     GA_RWHandleV3 Cd_h;
     GA_RWHandleF alpha_h;
-    GA_RWHandleV3 UV_h;
+    GA_RWHandleV2 UV_h;
+    GA_RWHandleS texture_h;
     GA_RWHandleS material_h;
     GA_RWHandleS override_h;
 
@@ -3940,7 +4091,7 @@ SOP_Read3mf::handleTriangles(XMLElement* element, int& numTriangles, const int o
 
         if (this->hasTexture || this->hasMulti) { // XXXXXX
             // I should be able to use GEO_STD_ATTRIB_TEXTURE in place of "uv", but it seems I can't
-            UV_h = GA_RWHandleV3(objGdp->addFloatTuple(GA_ATTRIB_VERTEX, "uv", 3, GA_Defaults(0.0)));
+            UV_h = GA_RWHandleV2(objGdp->addFloatTuple(GA_ATTRIB_VERTEX, "uv", 2, GA_Defaults(0.0)));
             if (!UV_h.isValid()) {
                 addError(SOP_MESSAGE, "UV attribute handle is invalid after its creation.");
                 std::cerr << "Error: UV attribute handle is invalid for object " << objID << " after its creation." << std::endl;
@@ -4024,7 +4175,7 @@ SOP_Read3mf::handleTriangles(XMLElement* element, int& numTriangles, const int o
 SOP_Read3mf::ErrorCode
 SOP_Read3mf::handleTriangle(XMLElement* element, int& numTriangles, const int objID, GU_Detail* objGdp,
     UT_Map<PointKey, GA_Offset>& pointDict, GA_RWHandleID& obj_h, GA_RWHandleV3& Cd_h, GA_RWHandleF& alpha_h,
-    GA_RWHandleV3& UV_h, GA_RWHandleS& material_h, GA_RWHandleS& override_h, TriangleState& triangleState) {
+    GA_RWHandleV2& UV_h, GA_RWHandleS& material_h, GA_RWHandleS& override_h, TriangleState& triangleState) {
 
     LOG_DEBUG(this->debug, "Entering handleTriangle");
     LOG_DEBUG(false, "We currently have " << objGdp->getNumPoints() << " points, "
@@ -4166,6 +4317,7 @@ SOP_Read3mf::handleTriangle(XMLElement* element, int& numTriangles, const int ob
 
     int pid = -1; // This will be the actual value found for the groupid on the triangle in the 3mf file
     int groupID; // The index for a colorgroup, texture2dgroup, etc. -- if pid not set, this will be set to the default
+    bool opaque; // First layers of multiproperties and almost all regular textures will need to be opaque
 
     tinyxml2::XMLError result_pid = element->QueryIntAttribute("pid", &pid);
     if (result_pid != tinyxml2::XML_SUCCESS) {
@@ -4202,7 +4354,7 @@ SOP_Read3mf::handleTriangle(XMLElement* element, int& numTriangles, const int ob
     std::vector<MultiType>* multiTypes = nullptr; // The type of each layer of a multiproperty
     std::vector<std::vector<int>>* multiPindices = nullptr; // The list of pindices for each layer (indices into colors or coordinates)
     std::vector<UT_StringHolder>* multiShaders = nullptr; // The list of shaders for each layer of a multiproperty
-    std::vector<AttrTrio>* attrHandles = nullptr; // We need at least one attribute handle per multiproperty layer
+    std::vector<AttrQuad>* attrHandles = nullptr; // We need at least one attribute handle per multiproperty layer
     UT_StringHolder lastShader; // Last shader in the stack -- the one we'll use for the materail
 
     if (triangleState.caching) { // Use the same arrays as last time
@@ -4239,10 +4391,11 @@ SOP_Read3mf::handleTriangle(XMLElement* element, int& numTriangles, const int ob
         auto itt = this->texture2dgroupDict.find(groupID);
         auto itm = this->multiDict.find(groupID);
 
-        // Set the appropriate data structures depending on whether it's color/base material/texture/multiproperty.
+        // Set the appropriate data structures depending on whether it's color/basematerial/texture/multiproperty.
         if (itt != this->texture2dgroupDict.end()) { // Pick which texture2dgroup to use for the triangle
             coordArray = &(itt->second.coords);
             triangleState.coordArray = coordArray;
+            opaque = true; // Regular non-multi textures should be opaque
             LOG_DEBUG(this->debug, "Size of coordArray is at first " << coordArray->size());
             if (!coordArray->size()) {
                 std::cerr << "Error: Array of uv corrdinates for this texture group has size 0" << std::endl;
@@ -4251,12 +4404,18 @@ SOP_Read3mf::handleTriangle(XMLElement* element, int& numTriangles, const int ob
             for (int i = 0; i < coordArray->size(); ++i) {
                 LOG_DEBUG(this->debug, "Coordarray of " << i << " is " << (*coordArray)[i][0] << ", " << (*coordArray)[i][1]);
             }
+    
             triangleState.texturePath = &(itt->second.texturePath);
             if (triangleState.texturePath) {
+                std::string newPath;
+                if (makeOpaqueTexture(groupID, triangleState.texturePath->buffer(), newPath) != ErrorCode::SUCCESS) {
+                    std::cerr << "Error: Unable to make opaque texture" << std::endl;
+                    return ErrorCode::OTHER;
+                }
                 triangleState.cachedJson = "{\"basecolor_useTexture\":1, \"basecolor_texture\":\"" + 
-                    std::string(triangleState.texturePath->buffer()) + "\"}";
+                std::string(newPath) + "\"}";
             }
-            LOG_DEBUG(this->debug, "We got texture with path" << triangleState.texturePath);
+            LOG_DEBUG(this->debug, "We got texture with path ptr " << triangleState.texturePath);
             useTexture = true;
         } else if (itc != colorDict.end()) {
             colorArray = &(itc->second);
@@ -4268,10 +4427,6 @@ SOP_Read3mf::handleTriangle(XMLElement* element, int& numTriangles, const int ob
             LOG_DEBUG(this->debug, "We got basemat ");
             useBase = true;
         } else if (itm != multiDict.end()) {
-                    auto itc = this->colorDict.find(groupID);
-        auto itb = this->basematDict.find(groupID);
-        auto itt = this->texture2dgroupDict.find(groupID);
-        auto itm = this->multiDict.find(groupID);
             multiPids = &(itm->second.multiPids);
             triangleState.multiPids = multiPids;
             multiTypes = &(itm->second.multiTypes);
@@ -4279,11 +4434,13 @@ SOP_Read3mf::handleTriangle(XMLElement* element, int& numTriangles, const int ob
             multiPindices = &(itm->second.multiPindices);
             triangleState.multiPindices = multiPindices;
             multiShaders = &(itm->second.multiShaders);
+            LOG_DEBUG(this->debug, "Set multiShaders to " << multiShaders);
             triangleState.multiShaders = multiShaders;
             attrHandles = &(itm->second.attrHandles);
             triangleState.attrHandles = attrHandles;
             triangleState.lastShader = itm->second.lastShader;
             lastShader = triangleState.lastShader;
+
             LOG_DEBUG(this->debug, "The multiDict entry is currently " << itm->second);
             LOG_DEBUG(this->debug, "We got multi with lastShader " << triangleState.lastShader);
             LOG_DEBUG(this->debug, "Our current handles are " << *(triangleState.attrHandles));
@@ -4337,7 +4494,7 @@ SOP_Read3mf::handleTriangle(XMLElement* element, int& numTriangles, const int ob
     //
     if (!useTexture && !useMulti) { // We're using color
         LOG_DEBUG(this->debug, "We are doing color");
-        if (setColorAttrs(objGdp, groupID, defaultColor, colorArray, useBase, basematArray, poly, p1, p2, p3, Cd_h, alpha_h)
+        if (setColorAttrs(objGdp, groupID, defaultColor, colorArray, false, useBase, basematArray, poly, p1, p2, p3, Cd_h, alpha_h)
             != ErrorCode::SUCCESS) {
             std::cerr << "Error: Unable to set color attributes on triangle " << " for object id " << objID << std::endl;
             return ErrorCode::OTHER;
@@ -4373,6 +4530,7 @@ SOP_Read3mf::handleTriangle(XMLElement* element, int& numTriangles, const int ob
         }
         for (exint i = 0; i < multiPids->size(); ++i) {
             LOG_DEBUG(this->debug, "Multi cycle " << i);
+            opaque = (i == 0) ? true : false; // First layers must be opaque
             if ((*multiTypes)[i] == MultiType::COLOR) {
                 if (!(*attrHandles)[i].Cd_h.isValid()) {
                     std::cerr << "Error: The multiproperty color attribute handle is not valid" << std::endl;
@@ -4383,19 +4541,21 @@ SOP_Read3mf::handleTriangle(XMLElement* element, int& numTriangles, const int ob
                    return ErrorCode::OTHER;
                 }
                 // Get the color array for the ith layer of the multiproperties
-                // We know it's valid since we would already have had to process the colorgroups.
+                // We know it's valid since we would already have had to process the colorgroup
+                // Our p values here are for the indices into the multiproperty array. But to set the colors
+                // we need the indices in the colorArray. 
+                int c1 = (*multiPindices)[p1][i];
+                int c2 = (*multiPindices)[p2][i];
+                int c3 = (*multiPindices)[p3][i];
+                
                 colorArray = &(this->colorDict[(*multiPids)[i]]);
-                if (setColorAttrs(objGdp, groupID, defaultColor, colorArray, useBase, basematArray, poly, p1, p2, p3,
+                if (setColorAttrs(objGdp, groupID, defaultColor, colorArray, opaque, useBase, basematArray, poly, c1, c2, c3,
                     (*attrHandles)[i].Cd_h, (*attrHandles)[i].alpha_h) != ErrorCode::SUCCESS) {
                     std::cerr << "Error: Unable to set multi color attributes on triangle " << " for object id " << objID << std::endl;
                     return ErrorCode::OTHER;
                 }
                 LOG_DEBUG(this->debug, "color cycle");
-            } else if ((*multiTypes)[i] == MultiType::BASE) {
-                if (i != 0) { // base materials can only be on the first layer
-                    std::cerr << "Error: We have a base material layer in a multiproperty that is not on layer 0." << std::endl;
-                    return ErrorCode::OTHER;
-                }                
+            } else if ((*multiTypes)[i] == MultiType::BASE) {  
                 if (!(*attrHandles)[i].Cd_h.isValid()) {
                     std::cerr << "Error: The multiproperty basematerial attribute handle is not valid" << std::endl;
                     return ErrorCode::OTHER;
@@ -4407,22 +4567,62 @@ SOP_Read3mf::handleTriangle(XMLElement* element, int& numTriangles, const int ob
                 // Get the basemat array for the ith layer of the multiproperties
                 // We know it's valid since we would already have had to process the basematerial groups.
                 basematArray = &(this->basematDict[(*multiPids)[i]]);
-                if (setColorAttrs(objGdp, groupID, defaultColor, colorArray, useBase, basematArray, poly, p1, p2, p3,
+                // XXX setting opaque to 0 in this call, but I'm not sure what I'm really supposed to do
+                if (setColorAttrs(objGdp, groupID, defaultColor, colorArray, true, useBase, basematArray, poly, p1, p2, p3,
                     (*attrHandles)[i].Cd_h, (*attrHandles)[i].alpha_h) != ErrorCode::SUCCESS) {
                     std::cerr << "Error: Unable to set multi base color attributes on triangle " << " for object id " << objID << std::endl;
                     return ErrorCode::OTHER;
                 }
                 LOG_DEBUG(this->debug, "base cycle");
             } else if ((*multiTypes)[i] == MultiType::TEXTURE) {
+
                 if (!(*attrHandles)[i].UV_h.isValid()) {
                     std::cerr << "Error: The multiproperty uv attribute handle is not valid" << std::endl;
                     return ErrorCode::OTHER;
                 }
                 coordArray = &(this->texture2dgroupDict[(*multiPids)[i]].coords);   // An array of coordinates for a texture
-                if (setTextureAttrs(objGdp, groupID, coordArray, poly, p1, p2, p3, (*attrHandles)[i].UV_h) != ErrorCode::SUCCESS) {
-                    std::cerr << "Error: Unable to set multi base color attributes on triangle " << " for object id " << objID << std::endl;
+                GA_RWHandleS texture_h = (*attrHandles)[i].texture_h;
+                // texture_h sanity checks
+                if (!texture_h.isValid()) {
+                    std::cerr << "texture attribute handle is no longer valid" << std::endl;
                     return ErrorCode::OTHER;
                 }
+                // Check if the handle is still 'connected' to this specific gdp -- maybe can get rid of this XXXX
+                if (&texture_h.getAttribute()->getIndexMap().getDetail() != objGdp) {
+                    std::cerr << "Error: Handle belongs to a different detail!" << std::endl;
+                    return ErrorCode::OTHER;
+                }                
+                if (setTextureAttrs(objGdp, groupID, coordArray, poly, p1, p2, p3, (*attrHandles)[i].UV_h) != ErrorCode::SUCCESS) {
+                    std::cerr << "Error: Unable to set multi texture attributes on triangle " << " for object id " << objID << std::endl;
+                    return ErrorCode::OTHER;
+                }
+                LOG_DEBUG(this->debug, "Back from setTextureAttrs in multi section");
+                // Get the path for the texture this multi layer uses
+                UT_StringHolder multiTexturePath = this->texture2dgroupDict[(*multiPids)[i]].texturePath;
+                triangleState.texturePath = &multiTexturePath;
+
+                if (opaque) {
+                    if (triangleState.texturePath) {
+                        std::string opaqueTexturePath;
+                        LOG_DEBUG(this->debug, "Calling makeOpaqueTexture with triangleState " << triangleState);
+                        if (makeOpaqueTexture(groupID, triangleState.texturePath ? triangleState.texturePath->buffer() : "", opaqueTexturePath)
+                            != ErrorCode::SUCCESS) {
+                            std::cerr << "Error: Unable to make opaque texture" << std::endl;
+                            return ErrorCode::OTHER;
+                        }
+                        LOG_DEBUG(this->debug, "Got back opaque path " << opaqueTexturePath);
+                        multiDict[groupID].opaqueTexturePath = opaqueTexturePath;
+                        texture_h.set(primOff, opaqueTexturePath);
+                    } else {
+                        std::cerr << "Error: trying to make an opaque texture from a null texture" << std::endl;
+                        return ErrorCode::OTHER;
+                    }
+                } else {
+                    LOG_DEBUG(this->debug, "Not using opaque texture");
+                    texture_h.set(primOff, multiTexturePath.buffer());
+                }
+
+                printMap(multiDict, "multiDict", this->debug);
                 LOG_DEBUG(this->debug, "texture cycle");
             } else {
                 std::cerr << "Error: Unknown type of multiproperty on a layer." << std::endl;
@@ -4467,54 +4667,12 @@ SOP_Read3mf::handleTriangle(XMLElement* element, int& numTriangles, const int ob
         std::cerr << "Error: Our array of uv coordinates is null but mustn't be, since we have a texture." << std::endl;
         return ErrorCode::OTHER;
     }
-    UT_Vector2 uv1;
-    UT_Vector2 uv2;
-    UT_Vector2 uv3;
-    if (this->flip) {
-        uv1 = (*coordArray)[p3];
-        uv2 = (*coordArray)[p2];
-        uv3 = (*coordArray)[p1];
-    } else {
-        uv1 = (*coordArray)[p1];
-        uv2 = (*coordArray)[p2];
-        uv3 = (*coordArray)[p3];
+
+    // makeOpaqueTexture will already have been called since this is a regular texture and not a multiproperty texture
+    if (setTextureAttrs(objGdp, groupID, coordArray, poly, p1, p2, p3, UV_h) != ErrorCode::SUCCESS) {
+        std::cerr << "Error: Unable to set multi texture attributes on triangle " << " for object id " << objID << std::endl;
+        return ErrorCode::OTHER;
     }
-    LOG_DEBUG(this->debug, "Got the coordinates");
-    /*
-    auto assign_uv = [&](int local_vtx_idx, int p_idx) {
-        if (p_idx >= 0 && p_idx < coordArray.size()) {
-            UT_Vector3 uv_vec(coordArray[p_idx][0], coordArray[p_idx][1], 0.0f);
-            
-            GA_Offset global_vtx_off = poly->getVertexOffset(local_vtx_idx);
-            UV_h.set(global_vtx_off, uv_vec);
-        }
-    };
-    */
-
-    int vertex = verts[0];
-    UT_Vector3T<float> coords;
-    coords[0] = uv1[0];
-    coords[1] = uv1[1];
-    coords[2] = 0.0;
-    GA_Offset global_vtx_off = poly->getVertexOffset(0);
-    LOG_DEBUG(this->debug, "For vertex 0 with offset " << global_vtx_off << " we have coords " << coords);
-    UV_h.set(global_vtx_off, coords);
-
-    vertex = verts[1];
-    coords[0] = uv2[0];
-    coords[1] = uv2[1];
-    coords[2] = 0.0;
-    global_vtx_off = poly->getVertexOffset(1);
-    LOG_DEBUG(this->debug, "For vertex 1 with offset " << global_vtx_off << " we have coords " << coords);
-    UV_h.set(global_vtx_off, coords);
-
-    vertex = verts[2];
-    coords[0] = uv3[0];
-    coords[1] = uv3[1];
-    coords[2] = 0.0;
-    global_vtx_off = poly->getVertexOffset(2);
-    LOG_DEBUG(this->debug, "For vertex 2 with offset " << global_vtx_off << " we have coords " << coords);
-    UV_h.set(global_vtx_off, coords);
 
     if (material_h.isValid() && this->shaderPath.length() > 0) {
         material_h.set(primOff, this->shaderPath);

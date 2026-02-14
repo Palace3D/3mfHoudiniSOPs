@@ -76,18 +76,20 @@ namespace HDK_Sample {
         TEXTURE     // texture group
     };
 
-    // Trio of possible attribute handles we might need per layer
-    struct AttrTrio {
+    // Quadtuple of possible attribute handles we might need per layer
+    struct AttrQuad {
         GA_RWHandleV3 Cd_h;
         GA_RWHandleF alpha_h;
         GA_RWHandleV2 UV_h;
+        GA_RWHandleS texture_h;
     };
 
     // Overload of operator << so I can print the attribute handle validity easily
-    inline std::ostream& operator<<(std::ostream& os, const HDK_Sample::AttrTrio& data) {
+    inline std::ostream& operator<<(std::ostream& os, const HDK_Sample::AttrQuad& data) {
         os << "(Cd_h: " << (data.Cd_h.isValid() ? "yes " : "no, ")
            << "alpha_h: " << (data.alpha_h.isValid() ? "yes " : "no, ")
            << "UV_h: " << (data.UV_h.isValid() ? "yes " : "no")
+           << "texture_h: " << (data.texture_h.isValid() ? "yes" : "no")
            << ")";
         
         return os;
@@ -99,10 +101,10 @@ namespace HDK_Sample {
         std::vector<int> multiPids; // list of resource ids for colorgroups, texture2dgroups, etc. for the different layers
         std::vector<MultiType> multiTypes; // list of what type each layer is for (color, base, texture)
         std::vector<std::vector<int>> multiPindices; // pindices into each layer group
-        //std::vector<UT_String> multiShaders; // list of shader node paths one per layer
         std::vector<UT_StringHolder> multiShaders; // list of shader nodes one per layer
-        std::vector<AttrTrio> attrHandles; // Attribute handles -- we'll need at least one of them per layer
+        std::vector<AttrQuad> attrHandles; // Attribute handles -- we'll need at least one of them per layer
         UT_StringHolder lastShader; // Path to the shader for the last layer -- the one we'll use for the material
+        UT_StringHolder opaqueTexturePath; // If we have to turn alpha to 1 on a texture and rewrite it
     };
 
     // Overload of operator << so I can print maps with MultiData in them
@@ -153,6 +155,11 @@ namespace HDK_Sample {
         for (size_t i = 0; i < data.multiShaders.size(); ++i) {
             os << data.multiShaders[i].buffer() << (i == data.multiShaders.size() - 1 ? "" : ", ");
         }
+        os << "]";
+
+        // Print opaque texture path
+        os << ", Opaque Texture Path: [";
+        os << data.opaqueTexturePath;
         os << "]";
 
         os << ", Last: " << data.lastShader;
@@ -301,13 +308,15 @@ namespace HDK_Sample {
         };
         
         struct TextureGroupData {
-            UT_String texturePath;
+            UT_StringHolder texturePath;
+            UT_StringHolder opaquePath;
             std::vector<UT_Vector2> coords;
             int originalTexId; // Useful for debugging, but not kept up-to-date in TriangleState!
 
             // Overload for TextureGroupData
             friend std::ostream& operator<<(std::ostream& os, const TextureGroupData& data) {
                 os << "{Path: " << data.texturePath 
+                   << ", Opaque Path: " << data.opaquePath
                    << ", Coords Count: " << data.coords.size() 
                    << ", OrigID: " << data.originalTexId << "}"; // Warning: not kept valid in TriangleState!
                 return os;
@@ -321,13 +330,13 @@ namespace HDK_Sample {
             int groupID = -1;
             std::vector<PixelColor>* colorArray = nullptr;    // An array of colors in a color group
             std::vector<UT_Vector2>* coordArray = nullptr;   // An array of coordinates for a texture
-            UT_String* texturePath = nullptr; // Path to the texture
+            UT_StringHolder* texturePath = nullptr; // Path to the texture
             std::vector<PixelColor>* basematArray = nullptr;  // An array of base material colors for a basematerial group
             std::vector<int>* multiPids = nullptr; // The pids per layer of a multiproperty
             std::vector<MultiType>* multiTypes = nullptr; // The type of each layer of a multiproperty
             std::vector<std::vector<int>>* multiPindices = nullptr; // The list of pindices for each layer (indices into colors or coordinates)
             std::vector<UT_StringHolder>* multiShaders = nullptr; // The list of shaders for each layer of a multiproperty
-            std::vector<AttrTrio>* attrHandles = nullptr; // We'll need at least one attr handle per layer
+            std::vector<AttrQuad>* attrHandles = nullptr; // We'll need at least one attr handle per layer
             UT_StringHolder lastShader; // Full path of the last shader in the stack -- the one we'll use for the material
             std::string cachedJson = "";
 
@@ -352,7 +361,15 @@ namespace HDK_Sample {
             friend std::ostream& operator<<(std::ostream& os, const TriangleState& data) {
                 os << "{Caching: " << data.caching 
                    << ", pid: " << data.pid
-                   << ", groupID: " << data.groupID << "}";
+                   << ", groupID: " << data.groupID
+                   << ", texturePath: ";
+
+                if (data.texturePath) {
+                    os << data.texturePath->buffer();
+                } else {
+                    os << "NULL";
+                }
+                os << "}";
                 return os;
             }
         };
@@ -419,13 +436,13 @@ namespace HDK_Sample {
         std::unordered_map<int, std::vector<PixelColor>>   basematDict;
 
         // key: texture2dgroup id (pid on triangles), value: the filename for this group's texture plus the uv coord array
-        std::unordered_map<int, TextureGroupData>           texture2dgroupDict;
+        std::unordered_map<int, TextureGroupData>          texture2dgroupDict;
 
         // key: texture2dgroup id ('pid' on triangles), value: shader node path
-        std::unordered_map<int, std::string>                shaderDict;
+        std::unordered_map<int, std::string>               shaderDict;
 
         // key: id for multiproperties, value: list of texture2dgroup/colorgroup ids
-        //std::unordered_map<int, std::vector<int>>           multiPids;
+        //std::unordered_map<int, std::vector<int>>         multiPids;
 
         // key: id for mutliproperties, value: MultiData (includes layer ids, layer pindices, and shader paths)
         std::unordered_map<int, MultiData> multiDict;
@@ -472,18 +489,20 @@ namespace HDK_Sample {
         SOP_Read3mf::ErrorCode      handleTriangles(tinyxml2::XMLElement* element, int& numTriangles, const int objID);
         SOP_Read3mf::ErrorCode      handleTriangle(tinyxml2::XMLElement* element, int& numTriangles, const int objID,
             GU_Detail* objGdp, UT_Map<PointKey, GA_Offset>& pointDict, GA_RWHandleID& obj_h, GA_RWHandleV3& Cd_h,
-            GA_RWHandleF& alpha_h, GA_RWHandleV3& UV_h, GA_RWHandleS& material_h, GA_RWHandleS& override_h,
-            TriangleState& triangleState);
+            GA_RWHandleF& alpha_h, GA_RWHandleV2& UV_h, GA_RWHandleS& material_h,
+            GA_RWHandleS& override_h, TriangleState& triangleState);
         SOP_Read3mf::ErrorCode      clearData();
         PixelColor                  convertHexStringToPixelColor(const std::string& hex_string);
         SOP_Read3mf::ErrorCode      colorFromTexture(const TextureGroupData &textureData, int pindex, PixelColor& returnColor);
         SOP_Read3mf::ErrorCode      colorFromMulti(const MultiData &multiData, int pindex, PixelColor& returnColor);
         SOP_Read3mf::ErrorCode      setColorAttrs(GU_Detail* objGdp, const int groupID, const PixelColor& defaultColor,
-            const std::vector<PixelColor>* colorArray, const bool useBase, const std::vector<PixelColor>* basematArray,
+            const std::vector<PixelColor>* colorArray, bool opaque, const bool useBase, const std::vector<PixelColor>* basematArray,
             GU_PrimPoly *poly, const int p1, const int p2, const int p3, GA_RWHandleV3& Cd_h, GA_RWHandleF& alpha_h);
-        SOP_Read3mf::ErrorCode      setTextureAttrs(GU_Detail* objGdp, const int groupID, const std::vector<UT_Vector2>* coordArray,
-            GU_PrimPoly *poly, const int p1, const int p2, const int p3, GA_RWHandleV2& UV_h);
+        SOP_Read3mf::ErrorCode      setTextureAttrs(GU_Detail* objGdp, const int groupID,
+            const std::vector<UT_Vector2>* coordArray, GU_PrimPoly *poly,
+            const int p1, const int p2, const int p3, GA_RWHandleV2& UV_h);
         SOP_Read3mf::ErrorCode      bindAttrHandles(GU_Detail* objGdp);
+        SOP_Read3mf::ErrorCode      makeOpaqueTexture(exint groupID, std::string texturePath, std::string& newPath);
     };
 } // End HDK_Sample namespace
 
