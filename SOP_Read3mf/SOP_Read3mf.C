@@ -162,6 +162,7 @@ static PRM_Name names[] = {
     PRM_Name("flip", "Flip Normals"),   // Houdini has the opposite winding order
     PRM_Name("build", "Apply Build Instructions"), // Render only the objects listed in the 3mf build instructions
     PRM_Name("geo", "Only Geometry"),   // Only import geometry -- no color or texture
+    PRM_Name("overrideShader", "Shader Override"), // Uses a single shader for multiple textures
     PRM_Name("debug", "Debug"),         // Some extra info printed to std::clog
     PRM_Name("timer", "Timer"),         // Record how long it takes to read in the model
     PRM_Name("filename", "File Name"),  // 3mf file name
@@ -173,6 +174,7 @@ static PRM_Name names[] = {
 static PRM_Default  flipit(1);  // Houdini winds in opposite order of 3mf
 static PRM_Default  buildit(1); // By default, we should apply these
 static PRM_Default  geo(0);     // By default, we'll read in everything
+static PRM_Default  overrideIt(0); // Use a single shader for many textures
 static PRM_Default  debugit(0); // Turn on during development or major debugging
 static PRM_Default  timeit(0);  // Record how long it takes to read in the model
 static PRM_Default  filen(0, "my-model.3mf");
@@ -187,11 +189,12 @@ SOP_Read3mf::myTemplateList[] = {
     PRM_Template(PRM_TOGGLE,	1, &names[0], &flipit, 0, 0, 0, 0, 1, "Flip Houdini normals to match 3mf normals."),
     PRM_Template(PRM_TOGGLE,    1, &names[1], &buildit, 0, 0, 0, 0, 1, "Apply 3mf build instructions and render only what is listed in them."),
     PRM_Template(PRM_TOGGLE,    1, &names[2], &geo, 0, 0, 0, 0, 1, "Only read in geometry -- no color or texture."),
-    PRM_Template(PRM_TOGGLE,    1, &names[3], &debugit, 0, 0, 0, 0, 1, "Print debug information."),
-    PRM_Template(PRM_TOGGLE,    1, &names[4], &timeit, 0, 0, 0, 0, 1, "Report the time it took to read in the model."),
-    PRM_Template(PRM_FILE_E,	1, &names[5], &filen, 0, 0, 0, 0, 1, "Name of the 3mf input file."),
-    PRM_Template(PRM_DIRECTORY_E,    1, &names[6], &assetsn, 0, 0, 0, 0, 1, "Folder in which to unpack the 3mf archive."),
-    PRM_Template(PRM_CALLBACK,  1, &names[7], 0, 0, 0, &SOP_Read3mf::read, 0, 1, "Read in the 3mf model."),
+    PRM_Template(PRM_TOGGLE,    1, &names[3], &overrideIt, 0, 0, 0, 0, 1, "Use one shader for many textures."),
+    PRM_Template(PRM_TOGGLE,    1, &names[4], &debugit, 0, 0, 0, 0, 1, "Print debug information."),
+    PRM_Template(PRM_TOGGLE,    1, &names[5], &timeit, 0, 0, 0, 0, 1, "Report the time it took to read in the model."),
+    PRM_Template(PRM_FILE_E,	1, &names[6], &filen, 0, 0, 0, 0, 1, "Name of the 3mf input file."),
+    PRM_Template(PRM_DIRECTORY_E,    1, &names[7], &assetsn, 0, 0, 0, 0, 1, "Folder in which to unpack the 3mf archive."),
+    PRM_Template(PRM_CALLBACK,  1, &names[8], 0, 0, 0, &SOP_Read3mf::read, 0, 1, "Read in the 3mf model."),
     PRM_Template(),
 };
 
@@ -736,6 +739,7 @@ SOP_Read3mf::clearData() {
     this->textureFilesDict.clear();
     //this->texturePid2IdDict.clear();
     this->shaderDict.clear();
+    this->opaqueShaderDict.clear();
     this->buildDict.clear();
 
     this->scale_factor = 1.0f; // Read from 3mf file, so needs to be reset
@@ -1076,7 +1080,7 @@ SOP_Read3mf::matnetSetup() {
     LOG_DEBUG(this->debug, "Entering matnetSetup");
 
     // The first time through we need to create the machinery to use textures or multi-properties.
-    // We put all of this inside a untility subnet.
+    // We put all of this inside a utility subnet.
     // We create the subnet with name from our node name, which will make it
     // unique if another 3mf reader node has also been instantiated.
     // After creating the utility subnet, we put down a matnet in it.
@@ -1671,6 +1675,7 @@ SOP_Read3mf::read(void *data, int index, fpreal t, const PRM_Template *tplate) {
     // Set up parameters. We at least need the debug for logging.
     me->debug = me->DEBUG(t);
     me->flip = me->FLIP(t);
+    me->overrideShader = me->OVERRIDE(t);
     me->build = me->BUILD(t);
     me->geoOnly = me->GEO(t);
     me->timer = me->TIMER(t);
@@ -1922,7 +1927,7 @@ SOP_Read3mf::parseModelForSubnet(std::string the_model) {
         }
         LOG_DEBUG(this->debug, "Now we have geoOnly: " << this->geoOnly << " hasColor: " << this->hasColor << " hasTexture: "
             << this->hasTexture << " hasMulti: " << this->hasMulti);
-        if (!this->geoOnly && this->hasTexture) {
+        if (!this->geoOnly && this->hasTexture && this->overrideShader) {
             // XXXX
             LOG_DEBUG(this->debug, "We have texture, so also create the override shader node");
             this->matnetOverrideSetup();
@@ -2102,6 +2107,7 @@ SOP_Read3mf::parseModel(std::string the_model) {
         printMap(texture2dgroupDict, "texture2dgroupDict", this->debug);
         printMap(multiDict, "multiDict", this->debug);
         printMap(shaderDict, "shaderDict", this->debug);
+        printMap(opaqueShaderDict, "opaqueShaderDict", this->debug);
         printMap(textureFilesDict, "textureFilesDict", this->debug);
     }
 
@@ -2445,6 +2451,13 @@ SOP_Read3mf::handleTexture2d(tinyxml2::XMLElement* element) {
         return ErrorCode::OTHER;
     }
     textureFilesDict[id] = usePath;
+    if (!this->overrideShader) {
+        // Set up shader and opaque shader nodes
+        if (handleShaders() != ErrorCode::SUCCESS) {
+            LOG_DEBUG(this->debug, "Unable to gather shader information.");
+            return ErrorCode::OTHER;
+        }
+    }
 
     LOG_DEBUG(this->debug, "Exiting handleTexture2d.");
 
@@ -2493,7 +2506,7 @@ SOP_Read3mf::handleTiling(int id, std::string path, Tiling tilestyleU, Tiling ti
     // XXX
     // I'm setting clamp tiling to none here. They are mostly the same except for none doing something
     // different about alpha=0 except on the first layer. So I treat them the same way in the rest of
-    // the code. I'll have to come back and differentiate them.
+    // the code. I'll have to come back and differentiate between them.
     //
     bool success = true; // Default tiling is wrap, which should pass through this function with success
     if (tilestyleU == Tiling::CLAMP) {
@@ -2561,7 +2574,7 @@ SOP_Read3mf::handleTexture2dgroup(tinyxml2::XMLElement* element) {
     // Get the texture file for this texid
     auto itf = textureFilesDict.find(texid);
     if (itf == textureFilesDict.end()) {
-        std::cerr << "Error: 3mf file uses a texid it hasn't defined." << std::endl;
+        std::cerr << "Error: 3mf file uses a texid that hasn't defined." << std::endl;
         return ErrorCode::BAD_3MF;
     }
     std::string textureFile = itf->second;
@@ -3009,6 +3022,62 @@ SOP_Read3mf::bindAttrHandles(GU_Detail* objGdp) {
     return ErrorCode::SUCCESS;
 }
 
+
+//
+// If we're not using a single shader for all our textures, create a shader for each texture plus a
+// shader for the opaque version of the texture.
+//
+SOP_Read3mf::ErrorCode
+SOP_Read3mf::handleShaders() {
+
+    LOG_DEBUG(this->debug, "Entering handleShaders");
+    
+    OP_Node* matnetNode = OPgetDirector()->findNode(this->matnetPath);
+    if (!matnetNode) {
+        std::cerr << "Error: Cannot find matnet node we already made." << std::endl;
+        return ErrorCode::OTHER;
+    }
+    OP_Network* matnetNet = dynamic_cast<OP_Network*>(matnetNode); // The shaders go in this subnet
+    for (const auto& pair : this->textureFilesDict) { // Create a shader for each texture
+        int key = pair.first;
+        const std::string& value = pair.second;
+        OP_Node* shaderNode = matnetNet->createNode("principledshader");
+        if (!shaderNode) {
+            std::cerr << "Error: Unable to create shader node." << std::endl;
+            return ErrorCode::OTHER;
+        }
+        LOG_DEBUG(this->debug, "Made a shader node");
+        UT_String fullShaderPath;
+        shaderNode->getFullPath(fullShaderPath);
+        LOG_DEBUG(this->debug, "Made shader " << fullShaderPath);
+        this->shaderDict[key] = fullShaderPath;
+        shaderNode->setFloat("basecolor", 0, 0.0, 1.0f);
+        shaderNode->setFloat("basecolor", 1, 0.0, 1.0f);
+        shaderNode->setFloat("basecolor", 2, 0.0, 1.0f);
+        shaderNode->setInt("basecolor_useTexture", 0, 0, 1);
+        //shaderNode->setString(value, CH_STRING_LITERAL, "basecolor_texture", 0, 0.0f);         
+        
+        OP_Node* opaqueShaderNode = matnetNet->createNode("principledshader");
+        if (!opaqueShaderNode) {
+            std::cerr << "Error: Unable to create opaque shader node." << std::endl;
+            return ErrorCode::OTHER;
+        }
+        LOG_DEBUG(this->debug, "Made an opaque shader node");
+        UT_String fullOpaqueShaderPath;
+        opaqueShaderNode->getFullPath(fullOpaqueShaderPath);
+        LOG_DEBUG(this->debug, "Made opaque shader " << fullOpaqueShaderPath);
+        this->opaqueShaderDict[key] = fullOpaqueShaderPath;
+        opaqueShaderNode->setFloat("basecolor", 0, 0.0, 1.0f);
+        opaqueShaderNode->setFloat("basecolor", 1, 0.0, 1.0f);
+        opaqueShaderNode->setFloat("basecolor", 2, 0.0, 1.0f);
+        opaqueShaderNode->setInt("basecolor_useTexture", 0, 0, 1);
+        //opaqueShaderNode->setString(value, CH_STRING_LITERAL, "basecolor_texture", 0, 0.0f);
+    }
+    
+      LOG_DEBUG(this->debug, "Exiting handleShaders");
+      return ErrorCode::SUCCESS;
+}
+    
 
 //
 // Handle multi-properties. We do this for object-level defaults but also for shaders, mixers, and attributes
@@ -3578,7 +3647,7 @@ SOP_Read3mf::colorFromMulti(const MultiData &multiData, int pindex, PixelColor &
 
 
 //
-// Parse the the object and set up a few Houdini datastructures.
+// Parse the the object and set up a few Houdini data structures.
 // In particular, set up the default color for the part in case there are triangles without
 // color or texture. Then go on to handle the child elements of the object.
 //
@@ -4112,11 +4181,15 @@ SOP_Read3mf::handleTriangles(XMLElement* element, int& numTriangles, const int o
             // for the string in the attribute. So maybe I should do this once for all the primitives in the new range
             // once I leave handleTriangle() XXX
             // Create an attribute to store the specific texture path for each primitive
-            override_h = GA_RWHandleS(objGdp->addStringTuple(GA_ATTRIB_PRIMITIVE, "material_override", 1));
-            if (!override_h.isValid()) {
-                addError(SOP_MESSAGE, "override attribute handle is invalid after its creation.");
-                std::cerr << "Error: override attribute handle is invalid for object " << objID << " after its creation." << std::endl;
-                return ErrorCode::OTHER;
+            if (this->overrideShader) {
+                override_h = GA_RWHandleS(objGdp->addStringTuple(GA_ATTRIB_PRIMITIVE, "material_override", 1));
+                if (!override_h.isValid()) {
+                    addError(SOP_MESSAGE, "override attribute handle is invalid after its creation.");
+                    std::cerr << "Error: override attribute handle is invalid for object " << objID << " after its creation." << std::endl;
+                    return ErrorCode::OTHER;
+                }
+            } else {
+                override_h = nullptr;
             }
         } // XXXXX
     }
@@ -4397,6 +4470,8 @@ SOP_Read3mf::handleTriangle(XMLElement* element, int& numTriangles, const int ob
             triangleState.coordArray = coordArray;
             opaque = true; // Regular non-multi textures should be opaque
             LOG_DEBUG(this->debug, "Size of coordArray is at first " << coordArray->size());
+            triangleState.originalTexId = itt->second.originalTexId;
+            LOG_DEBUG(this->debug, "originalTexId = " << triangleState.originalTexId);
             if (!coordArray->size()) {
                 std::cerr << "Error: Array of uv corrdinates for this texture group has size 0" << std::endl;
                 return ErrorCode::OTHER;
@@ -4414,6 +4489,22 @@ SOP_Read3mf::handleTriangle(XMLElement* element, int& numTriangles, const int ob
                 }
                 triangleState.cachedJson = "{\"basecolor_useTexture\":1, \"basecolor_texture\":\"" + 
                 std::string(newPath) + "\"}";
+                if (!this->overrideShader) {
+                    UT_String shaderPath(shaderDict[triangleState.originalTexId].c_str());
+                    UT_String opaqueShaderPath(opaqueShaderDict[triangleState.originalTexId].c_str());
+                    OP_Node* shaderNode = OPgetDirector()->findNode(shaderPath);
+                    OP_Node* opaqueShaderNode = OPgetDirector()->findNode(opaqueShaderPath);
+                    if (!shaderNode) {
+                        std::cerr << "Error: Cannot find shader node we already made." << std::endl;
+                        return ErrorCode::OTHER;
+                    }
+                    if (!opaqueShaderNode) {
+                        std::cerr << "Error: Cannot find opaque shader node we already made." << std::endl;
+                        return ErrorCode::OTHER;
+                    }
+                    shaderNode->setString(triangleState.texturePath->buffer(), CH_STRING_LITERAL, "basecolor_texture", 0, 0.0f);
+                    opaqueShaderNode->setString(newPath, CH_STRING_LITERAL, "basecolor_texture", 0, 0.0f);
+                }
             }
             LOG_DEBUG(this->debug, "We got texture with path ptr " << triangleState.texturePath);
             useTexture = true;
@@ -4674,9 +4765,16 @@ SOP_Read3mf::handleTriangle(XMLElement* element, int& numTriangles, const int ob
         return ErrorCode::OTHER;
     }
 
-    if (material_h.isValid() && this->shaderPath.length() > 0) {
+    if (this->overrideShader && material_h.isValid() && this->shaderPath.length() > 0) {
         material_h.set(primOff, this->shaderPath);
         LOG_DEBUG(this->debug, "Setting materialpath to " << this->shaderPath);
+    }
+    if (!this->overrideShader && material_h.isValid()) {
+        UT_String shaderPath(shaderDict[triangleState.originalTexId].c_str());
+        UT_String opaqueShaderPath(opaqueShaderDict[triangleState.originalTexId].c_str());
+        material_h.set(primOff, opaqueShaderPath);
+        // XXXX Will we ever use the regular texture here if we're just doing a texture?
+        LOG_DEBUG(this->debug, "Setting materialpath to " << opaqueShaderPath);
     }
 
     LOG_DEBUG(this->debug, "Before texturegroup thing.");
@@ -4685,9 +4783,9 @@ SOP_Read3mf::handleTriangle(XMLElement* element, int& numTriangles, const int ob
     // to continue and have no texture. If so, use this commented out line. XXXXX
     //const char* rawPath = (triangleState.texturePath) ? triangleState.texturePath->buffer() : "";
 
-    if (!triangleState.cachedJson.empty()) {
+    if (this->overrideShader && !triangleState.cachedJson.empty()) {
         override_h.set(primOff, triangleState.cachedJson.c_str());
-    } else {     // XXXX Maybe I should just let this go with no texture instead of returning an error.
+    } else if (this->overrideShader){     // XXXX Maybe I should just let this go with no texture instead of returning an error.
         std::cerr << "Error: Unable to set texture on the part." << std::endl;
         return ErrorCode::OTHER;
     }

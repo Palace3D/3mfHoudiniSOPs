@@ -339,6 +339,7 @@ namespace HDK_Sample {
             std::vector<AttrQuad>* attrHandles = nullptr; // We'll need at least one attr handle per layer
             UT_StringHolder lastShader; // Full path of the last shader in the stack -- the one we'll use for the material
             std::string cachedJson = "";
+            int originalTexId = -1;
 
             void clear() {
                 caching = false;
@@ -353,6 +354,7 @@ namespace HDK_Sample {
                 multiPindices = nullptr;
                 multiShaders = nullptr;
                 attrHandles = nullptr;
+                originalTexId = -1;
                 cachedJson.clear();
                 lastShader.clear();
             }
@@ -378,12 +380,14 @@ namespace HDK_Sample {
         bool                FLIP(fpreal t) { return evalInt("flip", 0, t); }
         bool                BUILD(fpreal t) { return evalInt("build", 0, t); }
         bool                GEO(fpreal t) { return evalInt("geo", 0, t); }
+        bool                OVERRIDE(fpreal t) { return evalInt("overrideShader", 0, t); }
         bool                TIMER(fpreal t) { return evalInt("timer", 0, t); }
         void                FILENAME(std::string& my_file, fpreal t)    { UT_StringHolder result; evalString(result, "filename", 0, t); my_file = result.toStdString(); return;}
         void                ASSETS(std::string& my_assets, fpreal t)   { UT_StringHolder result; evalString(result, "assets", 0, t); my_assets = result.toStdString(); return;}
         bool                DEBUG(fpreal t) { return evalInt("debug", 0, t); }
         std::string         filename;
         bool                flip;
+        bool                overrideShader;
         bool                timer;
         bool                build;
         bool                geoOnly;
@@ -397,11 +401,11 @@ namespace HDK_Sample {
         // node in case the user moves the sop. XXXX
         UT_String       subnetPath;
 
-        // The path to the node to use for our textures
+        // The path to the node to use for our textures if we're using a single shader
         UT_String       shaderPath;
 
-        // The path to the matnet for our multiproperties. For the same reason as for the subnetPath, I should change
-        // this to be relative to the parent node. XXXXX
+        // The path to the matnet for our textures or multiproperties. For the same reason as for the subnetPath,
+        // I should change this to be relative to the parent node. XXXXX
         UT_String       matnetPath;
 
         // Timestamp for the beginning  of the read operation.
@@ -440,6 +444,9 @@ namespace HDK_Sample {
 
         // key: texture2dgroup id ('pid' on triangles), value: shader node path
         std::unordered_map<int, std::string>               shaderDict;
+        
+        // key: texture2dgroup id ('pid' on triangles), value: the opaque shader node path
+        std::unordered_map<int, std::string>               opaqueShaderDict;        
 
         // key: id for multiproperties, value: list of texture2dgroup/colorgroup ids
         //std::unordered_map<int, std::vector<int>>         multiPids;
@@ -463,6 +470,7 @@ namespace HDK_Sample {
         void                        matnetSetup();
         static int                  read(void *data, int index, fpreal t, const PRM_Template *tplate);
         // SOP_Read3mf::ErrorCode   read3mf_archive(const std::vector<SOP_Read3mf::FileEntry>& files_to_add);
+        SOP_Read3mf::ErrorCode      handleShaders();
         SOP_Read3mf::ErrorCode      getModelFile(std::string rels_path, std::string& model_file);
         SOP_Read3mf::ErrorCode      parseModelForSubnet(std::string the_model);
         SOP_Read3mf::ErrorCode      parseModel(std::string the_model);

@@ -37,6 +37,9 @@
 #include <UT/UT_DSOVersion.h>
 #include <UT/UT_Matrix3.h>
 #include <UT/UT_Matrix4.h>
+#include <UT/UT_JSONParser.h>
+#include <GA/GA_AIFJSON.h>
+#include <GA/GA_Handle.h>
 #include <SYS/SYS_Math.h>
 //#include <stddef.h>
 #include <cstddef>
@@ -52,6 +55,8 @@
 #include <ctime>
 #include <SOP/SOP_Node.h>
 #include <UT/UT_Console.h>
+#include <UT/UT_JSONParser.h>
+#include <UT/UT_JSONValue.h>
 #include <GEO/GEO_Primitive.h>
 #include <FS/FS_Writer.h>
 //#include <UT/UT_Error.h>
@@ -88,6 +93,7 @@ newSopOperator(OP_OperatorTable *table)
 // SOP parameter names.
 static PRM_Name names[] = {
     PRM_Name("flip", "Flip Normals"),   // Houdini has the opposite winding order
+    PRM_Name("usedShaderOverride", "Uses Shader Override"), // Uses one shader for many textures
     PRM_Name("debug", "Debug"),         // Some extra info printed to std::clog
     PRM_Name("timer", "Timer"),         // Set timer to record how long it takes
     PRM_Name("debugfiles", "Debug Files"),  // Leave tmp files available for debugging
@@ -101,6 +107,7 @@ static PRM_Name names[] = {
 
 // SOP parameter defaults
 static PRM_Default  flipit(1);  // Houdini winds in opposite order of 3mf
+static PRM_Default  usedOverride(0); // For now assume we're using a part imported via Read3mf()
 static PRM_Default  debugit(0);
 static PRM_Default  timeit(0);
 static PRM_Default  debugfilesn(0);
@@ -116,15 +123,16 @@ static PRM_Default  designern(0, "");
 PRM_Template
 SOP_Save3mf::myTemplateList[] = {
     PRM_Template(PRM_TOGGLE,	1, &names[0], &flipit, 0, 0, 0, 0, 1, "Flip Houdini normals to match 3mf normals."),
-    PRM_Template(PRM_TOGGLE,    1, &names[1], &debugit, 0, 0, 0, 0, 1, "Print debug information."),
-    PRM_Template(PRM_TOGGLE,    1, &names[2], &timeit, 0, 0, 0, 0, 1, "Report the time it took to save the model."),
-    PRM_Template(PRM_TOGGLE,    1, &names[3], &debugfilesn, 0, 0, 0, 0, 1, "Preserve model files in /tmp for inspection."),
-    PRM_Template(PRM_STRING,	1, &names[4], &meshn, 0, 0, 0, 0, 1, "Give a name to the mesh in the 3mf file."),
-    PRM_Template(PRM_FILE_E,	1, &names[5], &filen, 0, 0, 0, 0, 1, "Name of the 3mf output file."),
-    PRM_Template(PRM_STRING,    1, &names[6], &titlen, 0, 0, 0, 0, 1, "Optional title to include in the 3mf header."),
-    PRM_Template(PRM_STRING,    1, &names[7], &descriptionn, 0, 0, 0, 0, 1, "Optional description to include in the 3mf header."),
-    PRM_Template(PRM_STRING,    1, &names[8], &designern, 0, 0, 0, 0, 1, "Optional designer's name to include in the 3mf header."),
-    PRM_Template(PRM_CALLBACK,  1, &names[9], 0, 0, 0, &SOP_Save3mf::save, 0, 1, "Save the 3mf model."),
+    PRM_Template(PRM_TOGGLE,    1, &names[1], &usedOverride, 0, 0, 0, 0, 1, "Uses a single shader for many textures."),
+    PRM_Template(PRM_TOGGLE,    1, &names[2], &debugit, 0, 0, 0, 0, 1, "Print debug information."),
+    PRM_Template(PRM_TOGGLE,    1, &names[3], &timeit, 0, 0, 0, 0, 1, "Report the time it took to save the model."),
+    PRM_Template(PRM_TOGGLE,    1, &names[4], &debugfilesn, 0, 0, 0, 0, 1, "Preserve model files in /tmp for inspection."),
+    PRM_Template(PRM_STRING,	1, &names[5], &meshn, 0, 0, 0, 0, 1, "Give a name to the mesh in the 3mf file."),
+    PRM_Template(PRM_FILE_E,	1, &names[6], &filen, 0, 0, 0, 0, 1, "Name of the 3mf output file."),
+    PRM_Template(PRM_STRING,    1, &names[7], &titlen, 0, 0, 0, 0, 1, "Optional title to include in the 3mf header."),
+    PRM_Template(PRM_STRING,    1, &names[8], &descriptionn, 0, 0, 0, 0, 1, "Optional description to include in the 3mf header."),
+    PRM_Template(PRM_STRING,    1, &names[9], &designern, 0, 0, 0, 0, 1, "Optional designer's name to include in the 3mf header."),
+    PRM_Template(PRM_CALLBACK,  1, &names[10], 0, 0, 0, &SOP_Save3mf::save, 0, 1, "Save the 3mf model."),
     PRM_Template(),
 };
 
@@ -134,18 +142,6 @@ SOP_Save3mf::myTemplateList[] = {
  * UTILITY FUNCTIONS
  * --------------------------------------------------------------------------------
  */
-
-//
-// Utility function for logging debug info
-//
-void
-logme(std::string msg, bool writeStatus) {
-    // logs to stdout/clog
-    if (writeStatus) {
-        std::clog << msg << std::endl; // We're debugging, so use endl to flush the buffer.
-    }
-    return;
-}
 
 
 //
@@ -298,7 +294,7 @@ generateTimestampString() {
 //
 SOP_Save3mf::ErrorCode
 SOP_Save3mf::clearData() {
-    logme("Entering clearData.", this->debug);
+    LOG_DEBUG(this->debug, "Entering clearData.");
 
     this->resourceId = INITIAL_ID; //MUST be > 1 so we can be use a lesser value for our object id
     this->objectId = INITIAL_ID - 1;
@@ -385,7 +381,7 @@ readFileToString(const std::string& filePath) {
 void
 printPrimTextCoords(const std::unordered_map<int, std::array<int, 3>>& primTextCoords, bool debug) {
     if (primTextCoords.empty()) {
-        logme("primTextCoords is empty.", debug);
+        LOG_DEBUG(debug, "primTextCoords is empty.");
         return;
     }
     {
@@ -404,7 +400,7 @@ printPrimTextCoords(const std::unordered_map<int, std::array<int, 3>>& primTextC
             st << "}" << std::endl;
         }
         st << "-------------------------------------------------" << std::endl;
-        logme(st.str(), debug);
+        LOG_DEBUG(debug, st.str());
     }
     return;
 }
@@ -451,7 +447,7 @@ SOP_Save3mf::cookMySop(OP_Context &context)
 {
     fpreal t = context.getTime();
     UT_Console::initConsole();
-    logme("Entering cookMySop", this->debug);
+    LOG_DEBUG(this->debug, "Entering cookMySop");
 
     // We must lock our inputs before we try to access their geometry.
     // OP_AutoLockInputs will automatically unlock our inputs when we return.
@@ -468,6 +464,8 @@ SOP_Save3mf::cookMySop(OP_Context &context)
     this->debug = this->DEBUG(t);
     this->debugfiles = this->DEBUGFILES(t);
     this->flip = this->FLIP(t);
+    this->usedShaderOverride = this->OVERRIDE(t);
+    LOG_DEBUG(this->debug, "Set usedShaderOverride to " << this->usedShaderOverride);
     this->timer = this->TIMER(t);
     this->MESH(this->mesh, t);
     this->FILENAME(this->filename, t);
@@ -486,11 +484,11 @@ SOP_Save3mf::cookMySop(OP_Context &context)
 
     if (!shouldSave) {
         // If we shouldn't save a geometry, the function exits, returning the cached geometry.
-        logme("Exiting cookMySop with no geometry to cook", this->debug);
+        LOG_DEBUG(this->debug, "Exiting cookMySop with no geometry to cook");
         return OP_ERROR::UT_ERROR_NONE;
     }
-    logme("Should save is " + std::to_string(shouldSave), this->debug);
-    logme("We need to save the geometry into a 3mf file.", this->debug);
+    LOG_DEBUG(this->debug, "Should save is " + std::to_string(shouldSave));
+    LOG_DEBUG(this->debug, "We need to save the geometry into a 3mf file.");
 
     // Clear out data structures so they don't have crud from the last save.
     clearData();
@@ -537,8 +535,8 @@ SOP_Save3mf::cookMySop(OP_Context &context)
     auto durationTime = endTime - this->start;
     auto duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(durationTime);
 
-    logme("Exiting read -- took " + std::to_string(duration_ms.count()) + " milliseconds", this->timer || this->debug);
-    logme("\nCompleted cooking with no errors. Mesh is " + this->mesh + " and filename is " + this->filename, this->debug);
+    LOG_DEBUG(this->timer || this->debug, "Exiting read -- took " + std::to_string(duration_ms.count()) + " milliseconds");
+    LOG_DEBUG(this->debug, "\nCompleted cooking with no errors. Mesh is " + this->mesh + " and filename is " + this->filename);
     
     return error();
 }
@@ -564,13 +562,13 @@ SOP_Save3mf::save(void *data, int index, fpreal t, const PRM_Template *tplate)
         return 0;
     }
 
-    logme("\nEntering save", this_node->debug);
+    LOG_DEBUG(this_node->debug, "\nEntering save");
 
     this_node->saveGeometry = true; // So cookMySop knows to save the geometry.
     this_node->forceRecook(); // Cause node to cook again
-    logme("Save geometry is " + std::to_string(this_node->saveGeometry), this_node->debug);
+    LOG_DEBUG(this_node->debug, "Save geometry is " + std::to_string(this_node->saveGeometry));
 
-    logme("Exiting save", this_node->debug);
+    LOG_DEBUG(this_node->debug, "Exiting save");
 
     return 1;
 }
@@ -601,7 +599,7 @@ SOP_Save3mf::buildModel(const GU_Detail* gdp) {
     // The beginning of the actual model section in 3mf.
     this->modelOutput.append("<resources>\n");
 
-    // We go through the model gathing texture information so that it can be writting to
+    // We go through the model gathering texture information so that it can be written to
     // the front part of the 3mf file. We check for textures before colors in
     // case of base color textures, which we just treat as colors.
     if ((myError = this->saveTextures(gdp)) != SOP_Save3mf::ErrorCode::SUCCESS) {
@@ -622,7 +620,7 @@ SOP_Save3mf::buildModel(const GU_Detail* gdp) {
     // Create a default color group and color if needed.
     this->defaultColor(gdp);
 
-    logme("Writing mesh to " + this->mesh, this->debug);
+    LOG_DEBUG(this->debug, "Writing mesh to " + this->mesh);
     
     // Now we collect the actual geometry information.
     if (this->write3mfObjectMesh(gdp) != ErrorCode::SUCCESS) {
@@ -634,7 +632,7 @@ SOP_Save3mf::buildModel(const GU_Detail* gdp) {
     this->modelOutput.append("</resources>\n");
 
     // Write the build items -- build transforms, etc.
-    logme("Writing build items", this->debug);
+    LOG_DEBUG(this->debug, "Writing build items");
 
     std::string uuid_str = generatePseudoUUID();
     this->modelOutput.append("<build p:UUID=\"" + uuid_str + "\">\n");
@@ -676,9 +674,9 @@ SOP_Save3mf::buildModel(const GU_Detail* gdp) {
 //
 SOP_Save3mf::ErrorCode
 SOP_Save3mf::write3mfObjectMesh(const GU_Detail* gdp) {
-    logme("Entering write3mfObjectMesh", this->debug);
+    LOG_DEBUG(this->debug, "Entering write3mfObjectMesh");
     if (gdp == nullptr) {
-        logme("fooey", this->debug);
+        LOG_DEBUG(this->debug, "fooey");
     }
     //printPrimTextCoords(this->primTextCoords, this->debug);
 
@@ -696,7 +694,7 @@ SOP_Save3mf::write3mfObjectMesh(const GU_Detail* gdp) {
     this->modelOutput.append("  <vertices>\n");
 
     GA_Size numPts = gdp->getNumPoints();
-    logme("There are " + std::to_string(numPts) + " vertices", this->debug);
+    LOG_DEBUG(this->debug, "There are " + std::to_string(numPts) + " vertices");
 
     for (GA_Iterator it(GA_Range(gdp->getPointMap(), GA_Offset(0), GA_Offset(numPts))); !it.atEnd(); ++it) {
         GA_Index pIndex = it.getIndex();
@@ -715,28 +713,29 @@ SOP_Save3mf::write3mfObjectMesh(const GU_Detail* gdp) {
 
     // write all the triangles
     GA_Size numPrims = gdp->getNumPrimitives();
-    logme("There are " + std::to_string(numPrims) + " triangles", this->debug);
+    LOG_DEBUG(this->debug, "There are " + std::to_string(numPrims) + " triangles");
     this->modelOutput.append("  <triangles>\n");
 
     //printPrimTextCoords(this->primTextCoords, this->debug);
-    for (GA_Iterator it(GA_Range(gdp->getPrimitiveMap(), GA_Offset(0), GA_Offset(numPrims))); !it.atEnd(); ++it) {
-        GA_Index primIndex = it.getIndex();
-        const GA_Primitive *primPtr = gdp->getPrimitiveByIndex(primIndex);
+    for (GA_Iterator it(gdp->getPrimitiveRange()); !it.atEnd(); ++it) {
+      GA_Offset primOffset = *it;
+      const GA_Primitive *primPtr = gdp->getPrimitive(primOffset);
+      GA_Index primIndex = gdp->primitiveIndex(primOffset);
 
         std::stringstream st;
-        logme("We're looking at prim with index " + std::to_string(primIndex), false);
+        LOG_DEBUG(false, "We're looking at prim with index " + std::to_string(primIndex));
 
         GA_Size numVerts = primPtr->getVertexCount();
         if (numVerts != 3) {
-            logme("Error: Primitives MUST be triangles.", this->debug);
+            LOG_DEBUG(this->debug, "Error: Primitives MUST be triangles.");
             std::cerr << "Error: Primitives MUST be triangles." << std::endl;
             return ErrorCode::BAD_GEO;
         }
-        logme(std::string("We got ") + std::to_string(numVerts) + std::string(" vertices for this prim"), false);
+        LOG_DEBUG(false, std::string("We got ") + std::to_string(numVerts) + std::string(" vertices for this prim"));
         const GA_OffsetListRef vertices = gdp->getPrimitiveVertexList(it.getOffset());
-        //logme("Another way to see it -- we have " + std::to_string(vertices.size()) + " vertices in this prim", this->debug);
+        //LOG_DEBUG(this->debug, "Another way to see it -- we have " + std::to_string(vertices.size()) + " vertices in this prim");
         std::array<int, 3> myPoints;
-        myPoints[1] = primPtr->getPointOffset(1);
+        myPoints[1] = primPtr->getPointIndex(1);
         if (this->flip) {
             myPoints[0] = primPtr->getPointIndex(2);
             myPoints[2] = primPtr->getPointIndex(0);
@@ -744,18 +743,17 @@ SOP_Save3mf::write3mfObjectMesh(const GU_Detail* gdp) {
             myPoints[0] = primPtr->getPointIndex(0);
             myPoints[2] = primPtr->getPointIndex(2);
         }
-        logme("    My points in order are " + std::to_string(myPoints[0]) + ", "
-            + std::to_string(myPoints[1]) + ", " + std::to_string(myPoints[2]), false);
+        LOG_DEBUG(false, "    My points in order are " + std::to_string(myPoints[0]) + ", "
+            + std::to_string(myPoints[1]) + ", " + std::to_string(myPoints[2]));
         
         // Does this primitive have texture?
         if (this->hasFileTexture && this->primTexts[primIndex] >= 0) {
             int textGroupId = this->primTextGroup[primIndex];
-            //logme(std::string("For PRIM ") + std::to_string(primIndex) + std::string(" with textGroupID ")
+            //LOG_DEBUG(this->debug, std::string("For PRIM ") + std::to_string(primIndex) + std::string(" with textGroupID ")
                 //+ std::to_string(textGroupId) + std::string(" we have indices ")
                 //+ std::to_string(primTextCoords[primIndex][0]) + std::string(" ")
                 //+ std::to_string(primTextCoords[primIndex][1]) + std::string(" ")
-                //+ std::to_string(primTextCoords[primIndex][2]),
-                //this->debug);
+                //+ std::to_string(primTextCoords[primIndex][2]));
             std::array<int, 3> textCoordIndices = this->primTextCoords[primIndex];
             st << "    <triangle v1=\"" << std::to_string(myPoints[0]) << "\" v2=\""
                 << std::to_string(myPoints[1]) + "\" v3=\"" << std::to_string(myPoints[2])
@@ -828,7 +826,7 @@ SOP_Save3mf::write3mfObjectMesh(const GU_Detail* gdp) {
     this->modelOutput.append(" </mesh>\n");
     this->modelOutput.append(" </object>\n");
 
-    logme("Exiting write3mfObjectMesh", this->debug);
+    LOG_DEBUG(this->debug, "Exiting write3mfObjectMesh");
     return ErrorCode::SUCCESS;
 }
 
@@ -840,13 +838,13 @@ SOP_Save3mf::write3mfObjectMesh(const GU_Detail* gdp) {
 SOP_Save3mf::ErrorCode
 SOP_Save3mf::write3mfItem(const GU_Detail* gdp, int objectId) {
 
-    logme("Entering write3mfItem", this->debug);
+    LOG_DEBUG(this->debug, "Entering write3mfItem");
     std::string uuid_str = generatePseudoUUID();
     this->modelOutput.append(" <item objectid=\"" + std::to_string(objectId));
     this->modelOutput.append("\" transform=\"" + SOP_Save3mf::TRANSFORM_TRIVIAL
         + "\" p:UUID=\"" + uuid_str + "\"/>\n");
 
-    logme("Exiting write3mfItem", this->debug);
+    LOG_DEBUG(this->debug, "Exiting write3mfItem");
     return ErrorCode::SUCCESS;
 }
 
@@ -859,7 +857,7 @@ SOP_Save3mf::write3mfItem(const GU_Detail* gdp, int objectId) {
 SOP_Save3mf::ErrorCode
 SOP_Save3mf::saveTextures(const GU_Detail* gdp) {
 
-    logme("In saveTextures", this->debug);
+    LOG_DEBUG(this->debug, "In saveTextures");
 
     // Go through prims and enter distinct textures in a key-value database.
     // Record which prims have which texture.
@@ -871,10 +869,15 @@ SOP_Save3mf::saveTextures(const GU_Detail* gdp) {
     // Does the part have any material path?
     GA_ROHandleS shaderpath_h(gdp, GA_ATTRIB_PRIMITIVE, "shop_materialpath");
     if (!shaderpath_h.isValid()) {
-        logme("No texture on model.", this->debug);
+        LOG_DEBUG(this->debug, "No texture on model.");
         return ErrorCode::SUCCESS;
     }
-    logme("We have file-based or base color texture on this part, at least somewhere.", this->debug);
+    GA_ROHandleS override_h(gdp, GA_ATTRIB_PRIMITIVE, "material_override");
+    if (this->usedShaderOverride && !override_h.isValid()) {
+        LOG_DEBUG(this->debug, "No override attribute for a textured object imported from read3mf()");
+        return ErrorCode::BAD_GEO;
+    }
+    LOG_DEBUG(this->debug, "We have file-based or base color texture on this part, at least somewhere.");
 
     // Find the material path for each prim
     int thisTextureId = -1; // -1 cannot be a resourceId, so we can initialize with it
@@ -882,10 +885,11 @@ SOP_Save3mf::saveTextures(const GU_Detail* gdp) {
     for (GA_Iterator it(gdp->getPrimitiveRange()); !it.atEnd(); ++it) {
         GA_Offset offset = *it;
         int primNum = it.getIndex();
-
-        //logme(std::string("PRIM ") + std::to_string(primNum) + std::string(":"), this->debug);
+        
+        LOG_DEBUG(this->debug, "PRIM " << primNum << ":");
         shaderpath = shaderpath_h.get(offset);
         std::string shaderstring(shaderpath.buffer());
+        LOG_DEBUG(this->debug, "shader string is " << shaderpath.buffer());
         // Note that we seem to get a shader path even if there is no texture on this primitive!
         // We have to check if the shader node is valid
         OP_Node*   shaderNode = nullptr;
@@ -894,7 +898,7 @@ SOP_Save3mf::saveTextures(const GU_Detail* gdp) {
             // No texture or base color texture on this primitive
             // this->primTexts[it.getIndex()] = TextureTypes::NONE;
             this->primTexts.push_back(-1);
-            //logme("    No texture on this primitive.", this->debug);
+            LOG_DEBUG(this->debug, "    No texture on this primitive.");
             continue;
         }
         
@@ -904,14 +908,14 @@ SOP_Save3mf::saveTextures(const GU_Detail* gdp) {
             // This means we're using the base color as a texture.
             //this->primTexts.push_back(thisTextureId);
             this->primTexts.push_back(-1);
-            //logme("   Base color texture on this primitive.", this->debug);
+            LOG_DEBUG(this->debug, "   Base color texture on this primitive.");
             std::array<float, 3> baseColor;
             shaderNode->evalFloats("basecolor", baseColor.data(), this->t);
             // Set up primColorDict with the color of this non-file texture
             {
                 std::stringstream st;
                 st << "    Red: " << baseColor[0] << ", Green: " << baseColor[1] << ", Blue: " << baseColor[2];
-                //logme(st.str(), this->debug);
+                //LOG_DEBUG(this->debug, st.str());
                 this->primColorDict[it.getIndex()].color = baseColor;
                 this->primColorDict[it.getIndex()].index =
                     this->primColorDict.size() - 1;
@@ -921,77 +925,187 @@ SOP_Save3mf::saveTextures(const GU_Detail* gdp) {
         // This primitive uses file-based texture. Get the texture path
         UT_String textureFileParam;
         shaderNode->evalString(textureFileParam, "basecolor_texture", /* component index */ 0, this->t);
-        std::string textureFilePath = textureFileParam.buffer();
+        LOG_DEBUG(this->debug, "textureFilePath will be " << textureFileParam.buffer());
+        UT_StringHolder textureFilePath = textureFileParam.buffer();
 
         // Check for emptiness
-        if (textureFilePath.empty()) {
+        if (textureFilePath.empty() && !this->usedShaderOverride) {
             std::cerr << "Error: No texture file for this textured primitive." << std::endl;
             return ErrorCode::BAD_GEO;
+        } else if (textureFilePath.empty()) { // We look for the texture path in the material_override attribute
+            LOG_DEBUG(this->debug, "empty textureFilePath, so checking for override");
+            // Assuming 'prim' is a GA_Primitive pointer
+            //GA_ROHandleS override_h(gdp->findPrimitiveAttribute("material_override"));
+            // 1. Outside the loop (only do this once for performance!)
+            // Use the String Handle since Dictionaries are stored as JSON strings
+
+            /*
+            const GA_Attribute *found_attr = gdp->findPrimitiveAttribute("override_h");
+            if (found_attr) {
+                // getStorageClass() returns an enum like GA_STORECLASS_STRING, GA_STORECLASS_DICT, etc.
+                LOG_DEBUG(this->debug, "Attribute exists! Storage Class: " << (int)found_attr->getStorageClass());
+                LOG_DEBUG(this->debug, "Type Name: " << found_attr->getType().getTypeName());
+            } else {
+                LOG_DEBUG(this->debug, "Attribute 'override_h' NOT found on Primitives.");
+            }
+            */
+
+            GA_ROHandleS override_h(gdp, GA_ATTRIB_PRIMITIVE, "override_h"); // MOVE ME OUTSIDE the loop XXXXX
+            LOG_DEBUG(this->debug, "Back from getting override_h");
+
+            if (override_h.isValid()) {
+                LOG_DEBUG(this->debug, "override_h dict is valid");
+                const char *json_cstr = override_h.get(offset);
+
+                if (json_cstr && *json_cstr) {
+                    LOG_DEBUG(this->debug, "json_cstr okay");
+                    UT_Options options;
+                    
+                    // 1. Create the stream from the raw C-string
+                    UT_IStream is(json_cstr, strlen(json_cstr), UT_ISTREAM_BINARY);
+                    
+                    // 2. Use the 2-argument load() candidate your compiler explicitly listed:
+                    // bool load(const char *filename, UT_IStream &is);
+                    // We provide a dummy filename as the first argument.
+                    options.load("internal_json", is); 
+
+                    // 3. Extract your data
+                    int64 use_tex = options.getOptionI("basecolor_useTexture");
+                    
+                    UT_String tex_path;
+                    options.getOptionS("basecolor_texture", tex_path);
+                    LOG_DEBUG(this->debug, "We got past getOptions");
+
+                    // 4. Using .length() as the absolute fallback for UT_String check
+                    if (use_tex > 0 && tex_path.length() > 0) {
+                        LOG_DEBUG(this->debug, "Yay. use_tex is " << use_tex << " and texture is " << tex_path);
+                        textureFilePath = tex_path;
+                    } else {
+                        LOG_DEBUG(this->debug, "yuck, use_tex is " << use_tex);
+                    }
+                } else {
+                    LOG_DEBUG(this->debug, "no good json_cstr");
+                }
+            } else {
+                LOG_DEBUG(this->debug, "override_h dict is not valid");
+            }
+/*
+            if (override_h.isValid()) {
+                LOG_DEBUG(this->debug, "override_h is valid");
+                // Get the JSON string from the attribute
+                // Use the offset directly to get the string
+                UT_StringHolder json_str = override_h.get(offset);
+                const char* start = json_str.buffer();
+                exint len = json_str.length();
+                if (len >= 2 && start[0] == '"') {
+                    LOG_DEBUG(this->debug, "We're adjusting the start buffer");
+                    start++;
+                    len -= 2;
+                } else {
+                    LOG_DEBUG(this->debug, "len was " << len);
+                }
+                
+                //UT_IStream is((const char *)json_str, json_str.length(), UT_ISTREAM_ASCII);
+                UT_IStream is(start, len, UT_ISTREAM_ASCII);
+                UT_Options options;
+                UT_JSONParser parser;
+
+                if (options.load(parser, false, &is, true)) { // the false means don't ignore ignore errorz
+                    LOG_DEBUG(this->debug, "Load worked. Option count: " << options.entries());
+                    UT_String texturePath;
+                    options.getOptionS("basecolor_texture", texturePath);
+                    if (texturePath.isstring()) {
+                        textureFilePath = UT_StringHolder(texturePath);
+                        LOG_DEBUG(this->debug, "Found it: " << textureFilePath);
+                    } else {
+                        LOG_DEBUG(this->debug, "Key 'basecolor_texture'not found in options");
+                    }
+
+                    // In 20.5, getOptionS returns void, so we check existence separately
+                    if (options.hasOption("basecolor_texture")) {
+                        LOG_DEBUG(this->debug, "There was a basecolor_texture option");
+                        UT_String texturePath;
+                        options.getOptionS("basecolor_texture", texturePath);
+                        
+                        textureFilePath = UT_StringHolder(texturePath);
+                        LOG_DEBUG(this->debug, "textureFilePath is now " << textureFilePath);
+                    } else {
+                        LOG_DEBUG(this->debug, "No basecolor_texture key in JSON");
+                    }
+                } else {
+                    std::cerr << "Unable to parse JSON options" << std::endl;
+                    return ErrorCode::BAD_GEO;
+                }
+
+                LOG_DEBUG(this->debug, "we got here");
+                
+                // Map search must use std::string conversion
+                // std::string searchKey = textureFilePath.toStdString(); (Safe)
+                // Or use .buffer() if textureFilePath is already populated
+                if (!textureFilePath.isEmpty()) {
+                    std::string key = textureFilePath.toStdString();
+                    if (this->primTextDict.find(key) != this->primTextDict.end()) {
+                        LOG_DEBUG(this->debug, "Got textureFilePath " << textureFilePath.buffer());
+                    } else { LOG_DEBUG(this->debug, "key not found");} // XXXXXX
+                } else {
+                    std::cerr << "textureFilePath was isEmpty" << std::endl;
+                        return ErrorCode::BAD_GEO;
+                }
+            } else {
+                std::cerr << "There is no valid override attribute handler" << std::endl;
+                return ErrorCode::BAD_GEO;
+            }
+*/
         }
         this->hasFileTexture = true; // We have file-based texture someplace on the model
-        //logme(std::string("    File texture ") + textureFilePath, this->debug);
+        //LOG_DEBUG(this->debug, std::string("    File texture ") + textureFilePath);
         // Check if texture already added to primTextDict. If not, add it.
         // Keys are texture paths, values are the resourceId for the texture
-        if (this->primTextDict.find(textureFilePath) != this->primTextDict.end()) {
-            // Texture file already in dictionary.
-            int thisTextureId = this->primTextDict[textureFilePath];
-            //logme(std::string("    We already have this texture, with resourceId ")
-                //+ std::to_string(thisTextureId), this->debug);
+        std::string textureFileKey = textureFilePath.toStdString();
+        if (this->primTextDict.find(textureFileKey) != this->primTextDict.end()) {
+            int thisTextureId = this->primTextDict[textureFileKey];
+            LOG_DEBUG(this->debug, "    We already have this texture, with resourceId " << thisTextureId);
             this->primTexts.push_back(thisTextureId);
-        } else {
-        // New texture with a new path
-            //logme(std::string("    New texture ") + textureFilePath
-                //+ std::string(" with resourceId ") + std::to_string(this->resourceId),
-                //this->debug);
-            std::string tFile;
-            std::string tPath;
-            size_t last_separator = textureFilePath.find_last_of("/\\");
-            if (last_separator == std::string::npos) {
-                // No separator found, the whole string is the file name
-                tPath = ".";
-                tFile = textureFilePath;
-            } else {
-                tPath = textureFilePath.substr(0, last_separator);
-                tFile = textureFilePath.substr(last_separator + 1);
-            }
+        } else { // New texture with a new path
+            UT_String tFile;
+            UT_String tPath;
+            UT_String tempPath = textureFilePath.buffer();
 
-            // There's a chance that there are textures with two different paths but the same base
-            // name. Since we place all textures into the 3mf texture without a path hierarchy, this
-            // would cause a collision. So we have to test for this collision and modify the base name
-            // to avoid it.
+            tempPath.splitPath(tPath, tFile);
+            LOG_DEBUG(this->debug, "    We got texture info path: " << tPath << " and file " << tFile);
+
+            // Convert to std::string for all subsequent std::string operations
+            std::string tFileStr = tFile.toStdString();
+            std::string textureFileKey = textureFilePath.toStdString(); // std::string key for maps
+
+            // Find the last dot to split base name and suffix
             std::string testname;
             std::string suffix;
-            size_t last_dot = tFile.find_last_of('.');
+            size_t last_dot = tFileStr.find_last_of('.');
             if (last_dot == std::string::npos || last_dot == 0) {
-            // No dot or dot is first character
-                testname = tFile;
+                testname = tFileStr;
                 suffix = "";
             } else {
-                testname = tFile.substr(0, last_dot);
-                suffix = tFile.substr(last_dot);
+                testname = tFileStr.substr(0, last_dot);
+                suffix = tFileStr.substr(last_dot);
             }
+
             // Test if base name has been seen before
             if (this->primTextBaseDict.find(testname) != this->primTextBaseDict.end()) {
-                // Base file name is not unique -- fix it
-                //logme(std::string("    We've seen ") + testname + std::string(" before"), this->debug);
                 int num = this->primTextBaseDict[testname];
-                tFile = testname + std::to_string(num + 1) + suffix;
-                //logme(std::string("    We now have tFile with name ") + tFile, false);
+                tFileStr = testname + std::to_string(num + 1) + suffix;
                 this->primTextBaseDict[testname] = num + 1;
             } else {
                 this->primTextBaseDict[testname] = 1;
             }
-            //std::string newTextPath = tPath + std::string("/") + tFile;
-            //this->primTextRewriteDict[textureFilePath] = newTextPath;
-            this->primTextRewriteDict[textureFilePath] = tFile;
-            this->primTextDict[textureFilePath] = thisTextureId = this->resourceId;
-            //logme(std::string("    resourceId is ") + std::to_string(thisTextureId), this->debug);
+
+            this->primTextRewriteDict[textureFileKey] = tFileStr;
+            this->primTextDict[textureFileKey] = thisTextureId = this->resourceId;
             ++this->resourceId;
 
             // Add texture to output
             std::string stringy = std::string("<m:texture2d id=\"") + std::to_string(thisTextureId)
-                + std::string("\" path=\"/3D/Texture/") + tFile + std::string("\" contenttype=\"image/");
-            //logme(std::string("    We have tmp string ") + stringy, false);
+                + std::string("\" path=\"/3D/Texture/") + tFileStr + std::string("\" contenttype=\"image/");
             std::string lower_s = return_lower(suffix);
             if (lower_s == std::string(".jpg") || lower_s == std::string(".jpeg")) {
                 stringy = stringy + std::string("jpeg\" tilestyleu=\"wrap\" tilestylev=\"wrap\" />\n");
@@ -1008,13 +1122,13 @@ SOP_Save3mf::saveTextures(const GU_Detail* gdp) {
 
     if (!this->hasFileTexture) {
         // No file-based textures, so nothing more to do.
-        logme("Exiting saveTextures", this->debug);
+        LOG_DEBUG(this->debug, "Exiting saveTextures");
         return ErrorCode::SUCCESS;
     }
 
-    GA_ROHandleV3 UV_h(gdp, GA_ATTRIB_VERTEX, "uv");
+    GA_ROHandleV2 UV_h(gdp, GA_ATTRIB_VERTEX, "uv");
     if (!UV_h.isValid()) {
-        std::cerr << "Error: Unable to retrive uv info on a model that uses file-based texture." << std::endl;
+        std::cerr << "Error: Unable to retreive uv info on a model that uses file-based texture." << std::endl;
         return ErrorCode::BAD_GEO;
     }
     
@@ -1032,13 +1146,14 @@ SOP_Save3mf::saveTextures(const GU_Detail* gdp) {
         this->modelOutput.append(stringy);
         int textGroupId = this->resourceId;
         ++this->resourceId;
-        //logme(std::string("Set texture group id to ") + std::to_string(textGroupId), this->debug);
-        //logme("About to cycle through prims in saveTextures:", this->debug);
+        //LOG_DEBUG(this->debug, std::string("Set texture group id to ") + std::to_string(textGroupId));
+        //LOG_DEBUG(this->debug, "About to cycle through prims in saveTextures:");
         for (GA_Iterator it(gdp->getPrimitiveRange()); !it.atEnd(); ++it) {
             GA_Offset offset = *it;
             int primNum = static_cast<int>(it.getIndex());
             // I'm still unsure about what I'll see with offsets and indices, so I have this
             // check here to see if I'm wrong.
+            
 	    /*
             if (static_cast<int>(offset) != primNum) {
                 std::cerr << "Prim number " << std::to_string(primNum)
@@ -1046,15 +1161,16 @@ SOP_Save3mf::saveTextures(const GU_Detail* gdp) {
                 return ErrorCode::BAD_GEO;
             }
 	    */
+
             if (this->primTexts[primNum] == textureId) { // This prim uses this texture
-                //logme(std::string("Prim ") + std::to_string(primNum) + std::string(" uses texture ")
+                //LOG_DEBUG(this->debug, std::string("Prim ") + std::to_string(primNum) + std::string(" uses texture ")
                     //+ std::to_string(textureId) + std::string(" and we have vertIndex ")
-                    //+ std::to_string(vertIndex), this->debug);
+                    //+ std::to_string(vertIndex));
                 this->primTextGroup[primNum] = textGroupId;
                 // XXX Test if size matches current prim num for sanity check.
                 // do vertices
                 const GA_OffsetListRef vertices = gdp->getPrimitiveVertexList(it.getOffset());
-                UT_Vector3 uv;
+                UT_Vector2 uv;
                 for (GA_Offset vOffset : vertices) {
                     uv = UV_h.get(vOffset);
                     {
@@ -1080,9 +1196,10 @@ SOP_Save3mf::saveTextures(const GU_Detail* gdp) {
         this->modelOutput.append(std::string("</m:texture2dgroup>\n"));
     }
     
-    //logme("Before leaving saveTextures: \n", this->debug);
+    //LOG_DEBUG(this->debug, "Before leaving saveTextures: \n");
     //printPrimTextCoords(this->primTextCoords, this->debug);
-    logme("Exiting saveTextures", this->debug);
+
+    LOG_DEBUG(this->debug, "Exiting saveTextures");
     return ErrorCode::SUCCESS;
 }
 
@@ -1103,11 +1220,11 @@ SOP_Save3mf::saveTextures(const GU_Detail* gdp) {
 SOP_Save3mf::ErrorCode
 SOP_Save3mf::saveColors(const GU_Detail* gdp) {
 
-    logme("In saveColors", this->debug);
-    //logme("Starting saveColors we have output " + this->modelOutput, this->debug);
+    LOG_DEBUG(this->debug, "In saveColors");
+    //LOG_DEBUG(this->debug, "Starting saveColors we have output " + this->modelOutput);
 
     if (this->primColorDict.size() > 0) { // We have triangles that will use a base color texture
-        logme("Geometry has a texture using base color texture.", this->debug);
+        LOG_DEBUG(this->debug, "Geometry has a texture using base color texture.");
         //this->modelOutput.append(std::format("<m:colorgroup id=\"{}\">\n", resourceId));
         {
             std::stringstream st;
@@ -1123,7 +1240,7 @@ SOP_Save3mf::saveColors(const GU_Detail* gdp) {
         GA_FOR_ALL_PRIMITIVES(gdp, primPtr) {
             GA_Index pIndex = it.getIndex();
             
-            //logme("primColorDict in use: We got prim id " + std::to_string(pIndex), this->debug);
+            //LOG_DEBUG(this->debug, "primColorDict in use: We got prim id " + std::to_string(pIndex));
 
             // If prim is in primColorDict then we use the base color texture found there
             if (auto it = this->primColorDict.find(pIndex); it != this->primColorDict.end()) {
@@ -1168,14 +1285,14 @@ SOP_Save3mf::saveColors(const GU_Detail* gdp) {
         Cd_h.bind(gdp, owner, "Cd");
         if (Cd_h.isValid()) {
             myOwner = owner;
-            logme("We have color as a " + std::to_string(owner) + " attribute", false);
+            LOG_DEBUG(false, "We have color as a " + std::to_string(owner) + " attribute");
             break;
         }
     }
     
     if (!Cd_h.isValid()) {
-        logme("No color on the model.", this->debug);
-        logme("Exiting saveColors", this->debug);
+        LOG_DEBUG(this->debug, "No color on the model.");
+        LOG_DEBUG(this->debug, "Exiting saveColors");
         return ErrorCode::SUCCESS;
     }
 
@@ -1187,28 +1304,28 @@ SOP_Save3mf::saveColors(const GU_Detail* gdp) {
     switch (myOwner) {
     case GA_ATTRIB_VERTEX:
     {
-        //logme("This is a VERTEX attribute", this->debug);
+        //LOG_DEBUG(this->debug, "This is a VERTEX attribute");
         this->colorType = ColorTypes::VERTEX;
         GA_Size numPrims = gdp->getNumPrimitives();
         for (GA_Iterator it(GA_Range(gdp->getPrimitiveMap(), GA_Offset(0), GA_Offset(numPrims))); !it.atEnd(); ++it) {
             GA_Index pIndex = it.getIndex();
             const GA_Primitive *primPtr = gdp->getPrimitiveByIndex(pIndex);
             GA_Size numVerts = primPtr->getVertexCount();
-            //logme("    There are " + std::to_string(numVerts) + " vertices on this prim.", this->debug);
+            //LOG_DEBUG(this->debug, "    There are " + std::to_string(numVerts) + " vertices on this prim.");
             if (numVerts != 3) {
-                logme("Error: Primitives MUST be triangles.", this->debug);
+                LOG_DEBUG(this->debug, "Error: Primitives MUST be triangles.");
                 std::cerr << "Error: Primitives MUST be triangles." << std::endl;
                 return ErrorCode::BAD_GEO;
             }
-            //logme("Prim #" + std::to_string(pIndex), this->debug);
+            //LOG_DEBUG(this->debug, "Prim #" + std::to_string(pIndex));
             const GA_OffsetListRef vertices = gdp->getPrimitiveVertexList(it.getOffset());
             for (GA_Offset vOffset : vertices) {
                 color = Cd_h.get(vOffset);
                 std::array<float, 3> standardColor;
-                //logme("Vertex Offset " + std::to_string(vOffset)
+                //LOG_DEBUG(this->debug, "Vertex Offset " + std::to_string(vOffset)
                     //+ " Color R:" + std::to_string(color.x())
                     //+ " G:" + std::to_string(color.y())
-                    //+ " B:" + std::to_string(color.z()), this->debug);
+                    //+ " B:" + std::to_string(color.z()));
                 standardColor = {color.x(), color.y(), color.z()};
                 std::string converted = convertColor(standardColor);
 
@@ -1221,16 +1338,16 @@ SOP_Save3mf::saveColors(const GU_Detail* gdp) {
     }
     case GA_ATTRIB_POINT:
     {
-        //logme("This is a point attribute", this->debug);
+        //LOG_DEBUG(this->debug, "This is a point attribute");
         this->colorType = ColorTypes::POINT;
         for (GA_Iterator it(gdp->getPointRange()); !it.atEnd(); ++it) {
             GA_Offset offset = *it;
             color = Cd_h.get(offset);
             std::array<float, 3> standardColor;
-            //logme("Point Offset " + std::to_string(offset)
+            //LOG_DEBUG(this->debug, "Point Offset " + std::to_string(offset)
                 //+ " Color R:" + std::to_string(color.x())
                 //+ " G:" + std::to_string(color.y())
-                //+ " B:" + std::to_string(color.z()), this->debug);
+                //+ " B:" + std::to_string(color.z()));
             standardColor = {color.x(), color.y(), color.z()};
             std::string converted = convertColor(standardColor);
 
@@ -1242,16 +1359,16 @@ SOP_Save3mf::saveColors(const GU_Detail* gdp) {
     }
     case GA_ATTRIB_PRIMITIVE:
     {
-       //logme("This is a prim attribute", this->debug);
+       //LOG_DEBUG(this->debug, "This is a prim attribute");
         this->colorType = ColorTypes::PRIM;
         for (GA_Iterator it(gdp->getPrimitiveRange()); !it.atEnd(); ++it) {
             GA_Offset offset = *it;
             color = Cd_h.get(offset);
             std::array<float, 3> standardColor;
-            //logme("Prim Offset " + std::to_string(offset)
+            //LOG_DEBUG(this->debug, "Prim Offset " + std::to_string(offset)
                 //+ " Color R:" + std::to_string(color.x())
                 //+ " G:" + std::to_string(color.y())
-                //+ " B:" + std::to_string(color.z()), this->debug);
+                //+ " B:" + std::to_string(color.z()));
             standardColor = {color.x(), color.y(), color.z()};
             std::string converted = convertColor(standardColor);
 
@@ -1263,13 +1380,13 @@ SOP_Save3mf::saveColors(const GU_Detail* gdp) {
     }
     case GA_ATTRIB_DETAIL:
     {
-        //logme("This is a detail attribute", this->debug);
+        //LOG_DEBUG(this->debug, "This is a detail attribute");
         this->colorType = ColorTypes::DETAIL;
         color = Cd_h.get(0);
         std::array<float, 3> standardColor;
-        //logme("Detail Color R:" + std::to_string(color.x())
+        //LOG_DEB*G(this->debug, "Detail Color R:" + std::to_string(color.x())
                 //+ " G:" + std::to_string(color.y())
-                //+ " B:" + std::to_string(color.z()), this->debug);
+                //+ " B:" + std::to_string(color.z()));
         standardColor = {color.x(), color.y(), color.z()};
         std::string converted = convertColor(standardColor);
 
@@ -1283,7 +1400,7 @@ SOP_Save3mf::saveColors(const GU_Detail* gdp) {
     }
     this->modelOutput.append("</m:colorgroup>\n");
 
-    logme("Exiting saveColors", this->debug);
+    LOG_DEBUG(this->debug, "Exiting saveColors");
 
     return ErrorCode::SUCCESS;
 }
@@ -1295,11 +1412,11 @@ SOP_Save3mf::saveColors(const GU_Detail* gdp) {
 //
 void
 SOP_Save3mf::defaultColor(const GU_Detail* gdp) {
-    logme("Entering defaultColor", this->debug);
+    LOG_DEBUG(this->debug, "Entering defaultColor");
 
     if (this->colorType == ColorTypes::NONE
         || this->defaultColorResource == -1) {
-        logme("Making a default color group", this->debug);
+        LOG_DEBUG(this->debug, "Making a default color group");
         {
             std::stringstream st;
             st << "<m:colorgroup id=\"" << this->resourceId << "\">\n";
@@ -1330,7 +1447,7 @@ SOP_Save3mf::defaultColor(const GU_Detail* gdp) {
 void
 SOP_Save3mf::writeHeader(bool material_ext, bool boolean_ext, bool production_ext) {
 
-    logme("In writeHeader", this->debug);
+    LOG_DEBUG(this->debug, "In writeHeader");
     this->modelOutput.append("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
     this->modelOutput.append("<model unit=\"millimeter\" xml:lang=\"en-US\""); // ToDo: put in mechanism for other units
     if (material_ext) { // Should this really come before the core specification?
@@ -1365,7 +1482,7 @@ SOP_Save3mf::writeHeader(bool material_ext, bool boolean_ext, bool production_ex
     this->modelOutput.append(this->timeString);
     this->modelOutput.append("</metadata>\n");
 
-    logme("Exiting writeHeader", this->debug);
+    LOG_DEBUG(this->debug, "Exiting writeHeader");
 
     return;
 }
@@ -1380,7 +1497,7 @@ SOP_Save3mf::writeHeader(bool material_ext, bool boolean_ext, bool production_ex
 SOP_Save3mf::ErrorCode
 SOP_Save3mf::doOutput() {
 
-    logme("In doOutput", this->debug);
+    LOG_DEBUG(this->debug, "In doOutput");
     std::string timestamp = this->timeString;
 
     // Create files to add to the zip file
@@ -1447,8 +1564,8 @@ SOP_Save3mf::doOutput() {
     for (const auto& pair : this->primTextDict) {
         std::string texturePath = pair.first;
         std::string rewritten = std::string("3D/Texture/") + this->primTextRewriteDict[texturePath];
-        logme(std::string("Looking at texture ") + texturePath, false);
-        logme(std::string("     Will try to move it to ") + tmp_path + rewritten, false);
+        LOG_DEBUG(false, std::string("Looking at texture ") + texturePath);
+        LOG_DEBUG(false, std::string("     Will try to move it to ") + tmp_path + rewritten);
         if (!createIntermediateDirectories(tmp_path + rewritten)) {
             std::cerr << "Error: Could not create path " << tmp_path + rewritten << std::endl;
             cleanupFiles(tmp_path, this->debugfiles);
@@ -1470,8 +1587,8 @@ SOP_Save3mf::doOutput() {
             + " Id=\"rel" + std::to_string(id)
             + "\" Type=\"http://schemas.microsoft.com/3dmanufacturing/2013/01/3dtexture\" />");
             ++id;
-        logme(std::string("Texture rels file string is now \n") + str_textRels
-            + std::string("\n"), false);
+        LOG_DEBUG(false, std::string("Texture rels file string is now \n") + str_textRels
+            + std::string("\n"));
     }
     if (!createIntermediateDirectories(tmp_path + textRelsFile)) {
         std::cerr << "Error: Could not create path " << tmp_path + textRelsFile << std::endl;
@@ -1513,15 +1630,15 @@ SOP_Save3mf::doOutput() {
     modelWriter.close();
 
     for (const auto& entry : this->files_to_add) {
-        logme("Source path is " + entry.source_path, false);
-        logme("Archive path is " + entry.archive_path, false);
+        LOG_DEBUG(false, "Source path is " + entry.source_path);
+        LOG_DEBUG(false, "Archive path is " + entry.archive_path);
         // std::string file_data = readFileToString(entry.source_path);
-        // logme(file_data + "\n", this->debug);
+        // LOG_DEBUG(this->debug, file_data + "\n");
     }
 
     save3mfArchive(this->files_to_add);
 
-    logme("Exiting doOutput", this->debug);
+    LOG_DEBUG(this->debug, "Exiting doOutput");
 
     cleanupFiles(tmp_path, this->debugfiles);
     return ErrorCode::SUCCESS;

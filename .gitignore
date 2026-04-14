@@ -14,11 +14,9 @@ SOP_Save3mf/*
 # Allow ONLY the specific files we need
 !SOP_Read3mf/SOP_Read3mf.C
 !SOP_Read3mf/SOP_Read3mf.h
-!SOP_Read3mf/CMakeLists.txt
 !SOP_Read3mf/stb_image.h
 !SOP_Read3mf/stb_image_write.h
 !SOP_Read3mf/tinyxml2.cpp
 !SOP_Read3mf/tinyxml2.h
 !SOP_Save3mf/SOP_Save3mf.C
 !SOP_Save3mf/SOP_Save3mf.h
-!SOP_Save3mf/CMakeLists.txt
