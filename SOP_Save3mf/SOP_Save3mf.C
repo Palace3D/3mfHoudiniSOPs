@@ -1487,6 +1487,36 @@ SOP_Save3mf::writeHeader(bool material_ext, bool boolean_ext, bool production_ex
     return;
 }
 
+// XXXXXXXXX
+#include <FS/FS_Reader.h>
+
+bool extractOpdefTexture(const UT_String &opdef_path, const UT_String &out_path) {
+
+    FS_Reader reader(opdef_path);
+    if (!reader.isGood())
+    {
+        std::cerr << "Error: Could not open opdef path: " << opdef_path << std::endl;
+        return false;
+    }
+
+    std::ofstream out(out_path.c_str(), std::ios::binary);
+    if (!out.is_open())
+    {
+        std::cerr << "Error: Could not open output path: " << out_path << std::endl;
+        return false;
+    }
+
+    UT_IStream *stream = reader.getStream();
+    char buf[4096];
+    while (!stream->isEof())
+    {
+        exint bytesRead = stream->bread(buf, sizeof(buf));
+        if (bytesRead > 0)
+            out.write(buf, bytesRead);
+    }
+
+    return true;
+}
 
 //
 // Create all the files needed for the 3mf archive and then call a function to zip them up.
@@ -1571,8 +1601,28 @@ SOP_Save3mf::doOutput() {
             cleanupFiles(tmp_path, this->debugfiles);
             return ErrorCode::ZIP_FAILURE;
         }
+        
+        // Resolve opdef: paths to a real temp file before copying
+        std::string resolvedTexturePath = texturePath;
+        LOG_DEBUG(this->debug, "Starting with resolved TexturePath " << resolvedTexturePath);
+        if (texturePath.rfind("opdef:", 0) == 0) {
+            LOG_DEBUG(this->debug, "Found opdef");
+            std::string tempTexPath = tmp_path + "extracted_texture_" 
+                + this->primTextRewriteDict[texturePath];
+            UT_String utSrc(texturePath.c_str());
+            UT_String utDst(tempTexPath.c_str());
+            if (!extractOpdefTexture(utSrc, utDst)) {
+                std::cerr << "Error: Could not extract opdef texture: " << texturePath << std::endl;
+                cleanupFiles(tmp_path, this->debugfiles);
+                return ErrorCode::FILE_FAILURE;
+            }
+            resolvedTexturePath = tempTexPath;
+            LOG_DEBUG(this->debug, "Now resolvedTexturePath is " << resolvedTexturePath);
+        }
+    
         try {
-            fs::copy(texturePath, tmp_path + rewritten, fs::copy_options::overwrite_existing);
+            //fs::copy(texturePath, tmp_path + rewritten, fs::copy_options::overwrite_existing);
+            fs::copy(resolvedTexturePath, tmp_path + rewritten, fs::copy_options::overwrite_existing);
         } catch (const fs::filesystem_error& e) {
             std::cerr << "Error: Filesystem error during copy of texture file: " << e.what() << std::endl;
             cleanupFiles(tmp_path, this->debugfiles);

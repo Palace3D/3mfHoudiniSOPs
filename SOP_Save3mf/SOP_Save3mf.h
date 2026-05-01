@@ -114,7 +114,7 @@ private:
 
     // If parameters change then the SOP recooks, so these don't need to be in callback data
     bool                FLIP(fpreal t) { return evalInt("flip", 0, t); }
-    bool                OVERRIDE(fpreal t) { return evalInt("usedOverride", 0, t); }
+    bool                OVERRIDE(fpreal t) { return evalInt("usedShaderOverride", 0, t); }
     void                MESH(std::string& my_mesh, fpreal t)      { UT_StringHolder result; evalString(result, "mesh", 0, t); my_mesh = result.toStdString(); return;}
     void                FILENAME(std::string& my_file, fpreal t)    { UT_StringHolder result; evalString(result, "filename", 0, t); my_file = result.toStdString(); return;}
     void                TITLE(std::string& my_title, fpreal t)   { UT_StringHolder result; evalString(result, "title", 0, t); my_title = result.toStdString(); return;}
