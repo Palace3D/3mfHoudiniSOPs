@@ -280,9 +280,11 @@ generateTimestampString() {
     // localtime is non-reentrant
     std::tm tm = *std::localtime(&tt);
     std::stringstream st;
-    st << std::put_time(&tm, "%Y-%m-%d_%H:%M:%S");
+    //st << std::put_time(&tm, "%Y-%m-%d_%H:%M:%S");
+    st << std::put_time(&tm, "%Y-%m-%d_%H-%M-%S"); // Cannot use : for compatibility on Windows systems
     // Append milliseconds
-    st << ":";
+    //st << ":";
+    st << "-"; // No : for compatibility on windows systems
     st << std::setfill('0') << std::setw(3) << ms_remainder;
 
     return st.str();
@@ -703,6 +705,7 @@ SOP_Save3mf::write3mfObjectMesh(const GU_Detail* gdp) {
             std::stringstream st;
             st << "    <vertex x=\"" << std::setw(3) << pos[0] << "\"";
             st << " y=\"" << std::setw(3) << pos[1] << "\"";
+            //st << " z=\"" << std::setw(3) << pos[2] << "\"/>\n";
             st << " z=\"" << std::setw(3) << pos[2] << "\"/>\n";
             //st << std::hex << std::uppercase << std::setfill('0');
             this->modelOutput.append(st.str());
@@ -1067,34 +1070,25 @@ SOP_Save3mf::saveTextures(const GU_Detail* gdp) {
             LOG_DEBUG(this->debug, "    We already have this texture, with resourceId " << thisTextureId);
             this->primTexts.push_back(thisTextureId);
         } else { // New texture with a new path
-            UT_String tFile;
-            UT_String tPath;
-            UT_String tempPath = textureFilePath.buffer();
+            // Convert texture file path to std::filesystem::path for cross-platform handling
+            std::filesystem::path fsPath(textureFilePath.toStdString());
+            std::string tFileStr = fsPath.filename().string();
+            std::string suffix = fsPath.extension().string();
+            std::string testname = fsPath.stem().string();
+            std::string textureFileKey = textureFilePath.toStdString();
 
-            tempPath.splitPath(tPath, tFile);
-            LOG_DEBUG(this->debug, "    We got texture info path: " << tPath << " and file " << tFile);
+            LOG_DEBUG(this->debug, "    We got texture info file: " << tFileStr);
 
-            // Convert to std::string for all subsequent std::string operations
-            std::string tFileStr = tFile.toStdString();
-            std::string textureFileKey = textureFilePath.toStdString(); // std::string key for maps
-
-            // Find the last dot to split base name and suffix
-            std::string testname;
-            std::string suffix;
-            size_t last_dot = tFileStr.find_last_of('.');
-            if (last_dot == std::string::npos || last_dot == 0) {
-                testname = tFileStr;
-                suffix = "";
-            } else {
-                testname = tFileStr.substr(0, last_dot);
-                suffix = tFileStr.substr(last_dot);
-            }
-
-            // Test if base name has been seen before
+            // Test if base name has been seen before, find a unique name if so
             if (this->primTextBaseDict.find(testname) != this->primTextBaseDict.end()) {
-                int num = this->primTextBaseDict[testname];
-                tFileStr = testname + std::to_string(num + 1) + suffix;
-                this->primTextBaseDict[testname] = num + 1;
+                int num = 1;
+                std::string candidateName = testname;
+                while (this->primTextBaseDict.find(candidateName) != this->primTextBaseDict.end()) {
+                    candidateName = testname + std::to_string(num);
+                    num++;
+                }
+                tFileStr = candidateName + suffix;
+                this->primTextBaseDict[candidateName] = 1;
             } else {
                 this->primTextBaseDict[testname] = 1;
             }
@@ -1112,11 +1106,12 @@ SOP_Save3mf::saveTextures(const GU_Detail* gdp) {
             } else if (lower_s == std::string(".png")) {
                 stringy = stringy + std::string("png\" tilestyleu=\"wrap\" tilestylev=\"wrap\" />\n");
             } else {
-                std::cerr << "Unaccepted texture file type suffix " + suffix << std::endl;
+                std::cerr << "Unaccepted texture file type suffix: " << suffix << std::endl;
                 return ErrorCode::BAD_GEO;
             }
             this->modelOutput.append(stringy);
             this->primTexts.push_back(thisTextureId);
+
         }
     }
 
@@ -1532,7 +1527,12 @@ SOP_Save3mf::doOutput() {
 
     // Create files to add to the zip file
     std::ostream *sp;
-    std::string tmp_path = std::string("/tmp/") + std::string("3mf_") + timestamp + "/";
+    std::filesystem::path tempDirCrossSystem = std::filesystem::temp_directory_path(); // Use tmp dir compatible on Windows as well
+    //std::string tmp_path = std::string("/tmp/") + std::string("3mf_") + timestamp + "/";
+    std::string tmp_path = (tempDirCrossSystem / ("3mf_" + timestamp)).string() + "/";
+    // Note: the / operator is overloaded for std::filesystem::path concatenation and handles
+    // the separator on both windows and linux. It also handles the fact that windows uses \ as a path separator instead of /, so
+    // I don't need to hardcode / between the temp directory and the folder name.
 
     // The file that describes all the kinds of contents we can have.
     std::string contenttypesFile = "[Content_Types].xml";
