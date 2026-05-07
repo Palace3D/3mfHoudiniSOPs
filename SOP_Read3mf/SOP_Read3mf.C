@@ -2773,7 +2773,8 @@ SOP_Read3mf::clampTexture(const int texid, const int groupId, std::string textur
         LOG_DEBUG(false, "We have finalWidth " << finalWidth << " and finalHeight " << finalHeight
             << " and finalRowStride " << finalRowStride << " and numChannels " << numChannels);
         // Pixel data for the left-most or right-most single column pixel
-        unsigned char edgePixelData[pixelBytes];
+        //unsigned char edgePixelData[pixelBytes];
+        std::vector<unsigned char> edgePixelData(pixelBytes);
         
         // Edge rows from the original image for V-clamping
         const unsigned char* originalTopRow = originalData; // y=0
@@ -2802,9 +2803,10 @@ SOP_Read3mf::clampTexture(const int texid, const int groupId, std::string textur
 
             // For a left streak, use the first pixel of the sourceRow
             const unsigned char* leftEdgePixelPtr = sourceRow;
-            std::memcpy(edgePixelData, leftEdgePixelPtr, pixelBytes);
+            //std::memcpy(edgePixelData, leftEdgePixelPtr, pixelBytes); // Can't do this on Windows, must do the next line instead
+            std::memcpy(edgePixelData.data(), leftEdgePixelPtr, pixelBytes);
             for (int x = 0; x < extendLeft; ++x) {
-                std::memcpy(newRow + x * pixelBytes, edgePixelData, pixelBytes);
+                std::memcpy(newRow + x * pixelBytes, edgePixelData.data(), pixelBytes);
             }
 
             // Now the original content (or the V-streaked row)
@@ -2813,11 +2815,11 @@ SOP_Read3mf::clampTexture(const int texid, const int groupId, std::string textur
 
             // For a right streak, use the last pixel of the sourceRow
             const unsigned char* rightEdgePixelPtr = sourceRow + (width - 1) * pixelBytes;
-            std::memcpy(edgePixelData, rightEdgePixelPtr, pixelBytes);
+            std::memcpy(edgePixelData.data(), rightEdgePixelPtr, pixelBytes);
             // The destination starts after the left streak and the copied original/streaked row data
             unsigned char* destPtr = newRow + (extendLeft * pixelBytes) + originalRowStride; 
             for (int x = 0; x < extendRight; ++x) {
-                std::memcpy(destPtr + x * pixelBytes, edgePixelData, pixelBytes);
+                std::memcpy(destPtr + x * pixelBytes, edgePixelData.data(), pixelBytes);
             }
         }
 
@@ -2837,7 +2839,8 @@ SOP_Read3mf::clampTexture(const int texid, const int groupId, std::string textur
         unsigned char* newImagePtr = newData.data();
 
         // Pixel data for the left-most or right-most column that will be streaked
-        unsigned char edgePixelData[pixelBytes];
+        //unsigned char edgePixelData[pixelBytes];
+        std::vector<unsigned char> edgePixelData(pixelBytes);
 
         // Copy edge pixels on left, then original image, then edge pixels on right
         // Do this row by row
@@ -2847,13 +2850,13 @@ SOP_Read3mf::clampTexture(const int texid, const int groupId, std::string textur
 
             // The first pixel of the original image is what we streak on the left side of the new image
             unsigned char* edgePixelPtr = const_cast<unsigned char*>(originalRow);
-            std::memcpy(edgePixelData, edgePixelPtr, pixelBytes);
+            std::memcpy(edgePixelData.data(), edgePixelPtr, pixelBytes);
             // Now streak it on the left
             for (int x = 0; x < extendLeft; ++x) {
                 if (y < 10 && x < 10) {
                     LOG_DEBUG(false, "We're streaking left by " << pixelBytes);
                 }
-                std::memcpy(newRow + x * pixelBytes, edgePixelData, pixelBytes);
+                std::memcpy(newRow + x * pixelBytes, edgePixelData.data(), pixelBytes);
             }
 
             // Now copy the original image row
@@ -2866,13 +2869,13 @@ SOP_Read3mf::clampTexture(const int texid, const int groupId, std::string textur
             // The last pixel of the original row is at (width - 1)
             edgePixelPtr = const_cast<unsigned char *>(originalRow) + (width - 1) * pixelBytes;
             // Streak on the right -- it's the last pixel of the original image that gets streaked
-            std::memcpy(edgePixelData, edgePixelPtr, pixelBytes);
+            std::memcpy(edgePixelData.data(), edgePixelPtr, pixelBytes);
             for (int x = 0; x < extendRight; ++x) {
                 if (y < 10 && x < 10) {
                     LOG_DEBUG(false, "We're streaking right at " << (extendLeft * pixelBytes) + originalRowStride + x * pixelBytes
                         << " by " << pixelBytes);
                 }
-                std::memcpy(newRow + (extendLeft * pixelBytes) + originalRowStride + x * pixelBytes, edgePixelData, pixelBytes);
+                std::memcpy(newRow + (extendLeft * pixelBytes) + originalRowStride + x * pixelBytes, edgePixelData.data(), pixelBytes);
             }
         }
         
@@ -2894,20 +2897,21 @@ SOP_Read3mf::clampTexture(const int texid, const int groupId, std::string textur
         unsigned char* newImagePtr = newData.data();
 
         // Pixel data for the upper-most or lower-most row that will be streaked
-        unsigned char edgePixelData[originalRowStride];
+        //unsigned char edgePixelData[originalRowStride];
+        std::vector<unsigned char> edgePixelData(pixelBytes);
 
         // Start with upper most
-        std::memcpy(edgePixelData, originalData, originalRowStride);
+        std::memcpy(edgePixelData.data(), originalData, originalRowStride);
         // Copy it to the lower streak
         for (int y = 0; y < extendUp; ++y) {
-            std::memcpy(newImagePtr + y * originalRowStride, edgePixelData, originalRowStride);
+            std::memcpy(newImagePtr + y * originalRowStride, edgePixelData.data(), originalRowStride);
         }
 
         // Copy the full original image (width x height) to the next part of the new buffer.
         std::memcpy(newImagePtr + extendUp * originalRowStride, originalData, width * height * numChannels);
         
         // Now get pixel data for the bottom streak and copy it
-        std::memcpy(edgePixelData, originalData + (height - 1) * originalRowStride, originalRowStride);
+        std::memcpy(edgePixelData.data(), originalData + (height - 1) * originalRowStride, originalRowStride);
         for (int y = 0; y < extendDown; ++y) {
             std::memcpy(newImagePtr + extendUp * originalRowStride + width * height * numChannels,
                 originalData + y * originalRowStride, originalRowStride);
@@ -4531,6 +4535,7 @@ SOP_Read3mf::handleTriangle(XMLElement* element, int& numTriangles, const int ob
             triangleState.attrHandles = attrHandles;
             triangleState.lastShader = itm->second.lastShader;
             lastShader = triangleState.lastShader;
+            opaque = false;
 
             LOG_DEBUG(this->debug, "The multiDict entry is currently " << itm->second);
             LOG_DEBUG(this->debug, "We got multi with lastShader " << triangleState.lastShader);
@@ -4672,6 +4677,7 @@ SOP_Read3mf::handleTriangle(XMLElement* element, int& numTriangles, const int ob
                     return ErrorCode::OTHER;
                 }
                 coordArray = &(this->texture2dgroupDict[(*multiPids)[i]].coords);   // An array of coordinates for a texture
+                LOG_DEBUG(this->debug, "For layer " << i << " got coordArray " << *(coordArray));
                 GA_RWHandleS texture_h = (*attrHandles)[i].texture_h;
                 // texture_h sanity checks
                 if (!texture_h.isValid()) {
