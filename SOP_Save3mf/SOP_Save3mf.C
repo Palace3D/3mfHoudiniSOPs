@@ -311,6 +311,7 @@ SOP_Save3mf::clearData() {
     this->primTextBaseDict.clear();
     this->primTextRewriteDict.clear();
     this->primColorDict.clear();
+    this->colorsByGroup.clear();
     this->primTextCoords.clear();
     this->files_to_add.clear();
     this->modelOutput.clear();
@@ -716,6 +717,7 @@ SOP_Save3mf::write3mfObjectMesh(const GU_Detail* gdp) {
 
     // write all the triangles
     GA_Size numPrims = gdp->getNumPrimitives();
+    LOG_DEBUG(this->debug, "In write we have " << numPrims << " primitives.");
     LOG_DEBUG(this->debug, "There are " + std::to_string(numPrims) + " triangles");
     this->modelOutput.append("  <triangles>\n");
 
@@ -765,7 +767,7 @@ SOP_Save3mf::write3mfObjectMesh(const GU_Detail* gdp) {
                 << "\" p2=\"" << std::to_string(textCoordIndices[1])
                 << "\" p3=\"" << std::to_string(textCoordIndices[2])
                 << "\"/>\n";
-        // Check if the prim number in the primColorDict. Set this up with the base color
+        // Check if the prim number is in the primColorDict. Set this up with the base color
         // texture group.
         } else if (auto pt = this->primColorDict.find(primIndex);
             pt != this->primColorDict.end()) {
@@ -779,47 +781,73 @@ SOP_Save3mf::write3mfObjectMesh(const GU_Detail* gdp) {
             switch (this->colorType) {
             // Using point color in Houdini. There will be one color per point in the color group.
             case ColorTypes::POINT:
-                st << "    <triangle v1=\"" << std::to_string(myPoints[0]) << "\" v2=\""
-                << std::to_string(myPoints[1]) + "\" v3=\""
-                << std::to_string(myPoints[2]) << "\" pid=\""
-                << std::to_string(this->colorgroupId)
-                << "\" p1=\"" << std::to_string(myPoints[0]) << "\" p2=\""
-                << std::to_string(myPoints[1]) << "\" p3=\"" << std::to_string(myPoints[2]) << "\"/>\n";
-                break;
+                {
+                    int i1 = getColorIndex(this->colorsByGroup[this->colorgroupId], primIndex, 0);
+                    int i2 = getColorIndex(this->colorsByGroup[this->colorgroupId], primIndex, 1);
+                    int i3 = getColorIndex(this->colorsByGroup[this->colorgroupId], primIndex, 2);
+                    if (this->flip) {
+                        int tmp = i1;
+                        i1 = i3;
+                        i3 = tmp;
+                    }
+                    if (i1 == -1 || i2 == -1 || i3 == -1) {
+                        std::cerr << "Error: No recorded color for a point with color." << std::endl;
+                        return ErrorCode::BAD_GEO;
+                    }
+                    LOG_DEBUG(this->debug, "Got colorgroup indices " << i1 << ", " << i2 << ", and " << i3);
+                    st << "    <triangle v1=\"" << std::to_string(myPoints[0]) << "\" v2=\""
+                    << std::to_string(myPoints[1]) + "\" v3=\""
+                    << std::to_string(myPoints[2]) << "\" pid=\""
+                    << std::to_string(this->colorgroupId)
+                    << "\" p1=\"" << std::to_string(i1) << "\" p2=\""
+                    << std::to_string(i2) << "\" p3=\"" << std::to_string(i3) << "\"/>\n";
+                    break;
+                }
             // Using vertex color. There will be one color per vertex in the color group.
             case ColorTypes::VERTEX:
-                if (this->flip) {
+                {
+                    int i1 = getColorIndex(this->colorsByGroup[this->colorgroupId], primIndex, 0);
+                    int i2 = getColorIndex(this->colorsByGroup[this->colorgroupId], primIndex, 1);
+                    int i3 = getColorIndex(this->colorsByGroup[this->colorgroupId], primIndex, 2);
+                    if (this->flip) {
+                        int tmp = i1;
+                        i1 = i3;
+                        i3 = tmp;
+                    }
+                    if (i1 == -1 || i2 == -1 || i3 == -1) {
+                        std::cerr << "Error: No recorded color for a point with color." << std::endl;
+                        return ErrorCode::BAD_GEO;
+                    }
+                    LOG_DEBUG(this->debug, "Got colorgroup indices " << i1 << ", " << i2 << ", and " << i3);
                     st << "    <triangle v1=\"" << std::to_string(myPoints[0]) << "\" v2=\"" <<
                     std::to_string(myPoints[1]) + "\" v3=\""
                     << std::to_string(myPoints[2]) << "\" pid=\""
                     << std::to_string(this->colorgroupId)
-                    << "\" p1=\"" << std::to_string(primIndex * 3 + 2) << "\" p2=\""
-                    << std::to_string(primIndex * 3+ 1) << "\" p3=\"" << std::to_string( primIndex * 3) << "\"/>\n";
-                } else {
-                    st << "    <triangle v1=\"" << std::to_string(myPoints[0]) << "\" v2=\"" <<
-                    std::to_string(myPoints[1]) + "\" v3=\""
-                    << std::to_string(myPoints[2]) << "\" pid=\""
-                    << std::to_string(this->colorgroupId)
-                    << "\" p1=\"" << std::to_string(primIndex * 3 + 2) << "\" p2=\""
-                    << std::to_string(primIndex * 3+ 1) << "\" p3=\"" << std::to_string( primIndex * 3) << "\"/>\n";
+                    << "\" p1=\"" << std::to_string(i1) << "\" p2=\""
+                    << std::to_string(i2) << "\" p3=\"" << std::to_string(i3) << "\"/>\n";
+                    break;
                 }
-                break;
             // Using prim color. There will be one color per prim in the color group.
             case ColorTypes::PRIM:
-                st << "    <triangle v1=\"" << std::to_string(myPoints[0]) << "\" v2=\""
-                << std::to_string(myPoints[1]) + "\" v3=\"" << std::to_string(myPoints[2])
-                << "\" pid=\"" << std::to_string(this->colorgroupId)
-                << "\" p1=\"" << std::to_string(primIndex) << "\"/>\n";
-                break;
+                {
+                    int i1 = getColorIndex(this->colorsByGroup[this->colorgroupId], primIndex, 0);
+                    st << "    <triangle v1=\"" << std::to_string(myPoints[0]) << "\" v2=\""
+                    << std::to_string(myPoints[1]) + "\" v3=\"" << std::to_string(myPoints[2])
+                    << "\" pid=\"" << std::to_string(this->colorgroupId)
+                    << "\" p1=\"" << std::to_string(i1) << "\"/>\n";
+                    break;
+                }
             // We treat detail color and no color the same way by assigning a default
             // object-level color to the model.
             case ColorTypes::DETAIL:
             case ColorTypes::NONE:
-                st << "    <triangle v1=\"" << std::to_string(myPoints[0]) << "\" v2=\""
-                << std::to_string(myPoints[1]) + "\" v3=\"" << std::to_string(myPoints[2])
-                << "\" pid=\"" << std::to_string(this->defaultColorResource)
-                << "\" p1=\"" << std::to_string(0) << "\"/>\n";
-                break;
+                {
+                    st << "    <triangle v1=\"" << std::to_string(myPoints[0]) << "\" v2=\""
+                    << std::to_string(myPoints[1]) + "\" v3=\"" << std::to_string(myPoints[2])
+                    << "\" pid=\"" << std::to_string(this->defaultColorResource)
+                    << "\" p1=\"" << std::to_string(0) << "\"/>\n";
+                    break;
+                }
             }
         }
         this->modelOutput.append(st.str());        
@@ -1198,6 +1226,39 @@ SOP_Save3mf::saveTextures(const GU_Detail* gdp) {
     return ErrorCode::SUCCESS;
 }
 
+//
+// Check if a color is in the list of colors for this colorgroup already. If not, add it. Record which primitive and vertex
+// should point to the color index in the list of colors for the colorgorup.
+//
+int
+SOP_Save3mf::getOrAddColor(ColorGroup& group, const std::string& color, int primIndex, int localVert, bool& isNew) {
+    auto it = group.colorIndex.find(color);
+    if(it != group.colorIndex.end()) {
+        isNew = false;
+        int idx = it->second;
+        group.colorIndices[primIndex][localVert] = idx;
+        return idx;
+    }
+    isNew = true;
+    int idx = group.colorIndex.size();
+    group.colorIndex[color] = idx;
+    group.colorIndices[primIndex][localVert] = idx;
+    return idx;
+}
+
+//
+// Return the index in the list of colors for the colorgroup for this primitive and vertex. If there isn't one set,
+// return -1.
+//
+int
+SOP_Save3mf::getColorIndex(ColorGroup& group, int primIndex, int localVert) {
+    auto it = group.colorIndices.find(primIndex);
+    if (it != group.colorIndices.end()) {
+        return it->second[localVert];
+    }
+    return -1; // not found
+}
+
 
 //
 // Go through the Houdini data and find all the color attributes -- whether
@@ -1256,14 +1317,13 @@ SOP_Save3mf::saveColors(const GU_Detail* gdp) {
     // Now go on to do normal color recording -- when we write out the mesh we'll override with
     // primColorTextureGroupId if needed.
 
-    // Check for color by inverse order of preference. (Preference order is vertex, point, then prim.
-    // That way we'll end up with the priority type of color in the end if there's more than one kind
-    // of color attribute. We don't attempt to do any blending of color across attribute types. If we
+    // Check for color according to the order of preference. (Preference order is vertex, point, then prim.
+    // We don't attempt to do any blending of color across attribute types. If we
     // do that in the future, we'll need to redo this.
 
     // Is there a color attribute on vertices? If so, append a colorgroup id. 
-    // then loop through prims and get the colors on their vertices and add them to the color
-    // list for the color group.
+    // then loop through prims and get the colors on their vertices. Check if those are already
+    // listed, and if so, point to the index of that color in the colorgroup for this prim/vertex.
 
     GA_Attribute *attrib;
     GA_AttributeOwner myOwner;
@@ -1294,17 +1354,21 @@ SOP_Save3mf::saveColors(const GU_Detail* gdp) {
     this->modelOutput.append("<m:colorgroup id=\"" + std::to_string(this->resourceId) + "\">\n");
     this->colorgroupId = this->resourceId;
     ++this->resourceId;
+    // Add this colorgroup if it isn't already there
+    this->colorsByGroup.emplace(this->colorgroupId, SOP_Save3mf::ColorGroup());
+    LOG_DEBUG(this->debug, "We just added colorgroupId " << this->colorgroupId << " to the data structure");
 
     UT_Vector3 color;
     switch (myOwner) {
     case GA_ATTRIB_VERTEX:
     {
-        //LOG_DEBUG(this->debug, "This is a VERTEX attribute");
+        LOG_DEBUG(this->debug, "This is a VERTEX attribute");
         this->colorType = ColorTypes::VERTEX;
         GA_Size numPrims = gdp->getNumPrimitives();
-        for (GA_Iterator it(GA_Range(gdp->getPrimitiveMap(), GA_Offset(0), GA_Offset(numPrims))); !it.atEnd(); ++it) {
-            GA_Index pIndex = it.getIndex();
-            const GA_Primitive *primPtr = gdp->getPrimitiveByIndex(pIndex);
+        LOG_DEBUG(false, "We have " << numPrims << " primitives.");
+        for (GA_Iterator it(gdp->getPrimitiveRange()); !it.atEnd(); ++it) {
+            GA_Index pIndex = gdp->primitiveIndex(it.getOffset());
+            const GA_Primitive *primPtr = gdp->getPrimitive(it.getOffset());
             GA_Size numVerts = primPtr->getVertexCount();
             //LOG_DEBUG(this->debug, "    There are " + std::to_string(numVerts) + " vertices on this prim.");
             if (numVerts != 3) {
@@ -1314,27 +1378,52 @@ SOP_Save3mf::saveColors(const GU_Detail* gdp) {
             }
             //LOG_DEBUG(this->debug, "Prim #" + std::to_string(pIndex));
             const GA_OffsetListRef vertices = gdp->getPrimitiveVertexList(it.getOffset());
-            for (GA_Offset vOffset : vertices) {
+            for (int localVert = 0; localVert < 3; localVert++) {
+                GA_Offset vOffset = vertices[localVert];
                 color = Cd_h.get(vOffset);
-                std::array<float, 3> standardColor;
-                //LOG_DEBUG(this->debug, "Vertex Offset " + std::to_string(vOffset)
-                    //+ " Color R:" + std::to_string(color.x())
-                    //+ " G:" + std::to_string(color.y())
-                    //+ " B:" + std::to_string(color.z()));
-                standardColor = {color.x(), color.y(), color.z()};
+                std::array<float, 3> standardColor = {color.x(), color.y(), color.z()};
                 std::string converted = convertColor(standardColor);
-
-                this->modelOutput.append("  <m:color color=\"#");
-                this->modelOutput.append(converted);
-                this->modelOutput.append("\"/>\n");            
+                bool isNew;
+                int colorIndex = getOrAddColor(this->colorsByGroup[this->colorgroupId], converted, pIndex, localVert, isNew);
+                
+                LOG_DEBUG(this->debug, "prim " << pIndex << " local vert " << localVert << " color " << converted << " index " << colorIndex << " isNew " << isNew);
+                if (isNew) {
+                    this->modelOutput.append("  <m:color color=\"#");
+                    this->modelOutput.append(converted);
+                    this->modelOutput.append("\"/>\n");
+                    //this->colorsByGroup->colorIndices[primIndex[vOffset] = colorIndex;
+                }
             }
         }
         break;
     }
     case GA_ATTRIB_POINT:
     {
-        //LOG_DEBUG(this->debug, "This is a point attribute");
+        LOG_DEBUG(this->debug, "This is a point attribute");
         this->colorType = ColorTypes::POINT;
+        for (GA_Iterator it(gdp->getPrimitiveRange()); !it.atEnd(); ++it) {
+            GA_Offset primOffset = *it;
+            GA_Index pIndex = gdp->primitiveIndex(primOffset);
+            const GA_Primitive *prim = gdp->getPrimitive(primOffset);
+            
+            for (int localVert = 0; localVert < 3; localVert++) {
+                GA_Offset vertOffset = prim->getVertexOffset(localVert);
+                GA_Offset pointOffset = gdp->vertexPoint(vertOffset); // get the point for this vertex
+                color = Cd_h.get(pointOffset); // look up color by point offset
+                
+                std::array<float, 3> standardColor = {color.x(), color.y(), color.z()};
+                std::string converted = convertColor(standardColor);
+                bool isNew;
+                int colorIndex = getOrAddColor(this->colorsByGroup[this->colorgroupId], converted, pIndex, localVert, isNew);
+                LOG_DEBUG(this->debug, "prim " << pIndex << " local vert " << localVert << " color " << converted << " index " << colorIndex << " isNew " << isNew);
+                if (isNew) {
+                    this->modelOutput.append("  <m:color color=\"#");
+                    this->modelOutput.append(converted);
+                    this->modelOutput.append("\"/>\n");
+                }
+            }
+        }
+/*
         for (GA_Iterator it(gdp->getPointRange()); !it.atEnd(); ++it) {
             GA_Offset offset = *it;
             color = Cd_h.get(offset);
@@ -1350,11 +1439,12 @@ SOP_Save3mf::saveColors(const GU_Detail* gdp) {
             this->modelOutput.append(converted);
             this->modelOutput.append("\"/>\n");
         }
+*/
         break;
     }
     case GA_ATTRIB_PRIMITIVE:
     {
-       //LOG_DEBUG(this->debug, "This is a prim attribute");
+       LOG_DEBUG(this->debug, "This is a prim attribute");
         this->colorType = ColorTypes::PRIM;
         for (GA_Iterator it(gdp->getPrimitiveRange()); !it.atEnd(); ++it) {
             GA_Offset offset = *it;
@@ -1366,16 +1456,22 @@ SOP_Save3mf::saveColors(const GU_Detail* gdp) {
                 //+ " B:" + std::to_string(color.z()));
             standardColor = {color.x(), color.y(), color.z()};
             std::string converted = convertColor(standardColor);
-
-            this->modelOutput.append("  <m:color color=\"#");
-            this->modelOutput.append(converted);
-            this->modelOutput.append("\"/>\n");
+            GA_Index pIndex = gdp->primitiveIndex(offset);
+            bool isNew;
+            int colorIndex = getOrAddColor(this->colorsByGroup[this->colorgroupId], converted, pIndex, 0, isNew);
+            LOG_DEBUG(this->debug, "prim " << pIndex << " local vert " << 0 << " ('cause this is a prim) color " << converted << " index " << colorIndex << " new " << isNew);
+            
+            if (isNew) {
+                this->modelOutput.append("  <m:color color=\"#");
+                this->modelOutput.append(converted);
+                this->modelOutput.append("\"/>\n");
+            }
         }
         break;
     }
     case GA_ATTRIB_DETAIL:
     {
-        //LOG_DEBUG(this->debug, "This is a detail attribute");
+        LOG_DEBUG(this->debug, "This is a detail attribute");
         this->colorType = ColorTypes::DETAIL;
         color = Cd_h.get(0);
         std::array<float, 3> standardColor;

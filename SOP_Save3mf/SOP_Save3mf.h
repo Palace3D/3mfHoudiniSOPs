@@ -149,6 +149,15 @@ private:
         std::array<float, 3>    color;  // color for this prim
 
     };
+    
+    // The colors in a colorgroup
+    struct ColorGroup {
+        std::unordered_map<std::string, int> colorIndex; // color -> index, for fast lookup
+        std::unordered_map<int, std::array<int, 3>> colorIndices; // Record the color index per prim/point/vertex
+    };
+    
+    int getOrAddColor(ColorGroup& group, const std::string& color, int primNum, int vertexSlot, bool& isNew);
+    int getColorIndex(ColorGroup& group, int primIndex, int localVert);
 
     // Timestamp for the beginning  of the save operation.
     std::chrono::time_point<std::chrono::high_resolution_clock>   start;
@@ -194,6 +203,9 @@ private:
 
     // Keys are prim number, values are the colors for base textures that are color-based not file-based
     std::unordered_map<int, BaseColorInfo>  primColorDict;
+    
+    // Keys are the colorgroup ID, values are the colors in the colorgroup in the hex string format used in the 3mf file
+    std::unordered_map<int, ColorGroup> colorsByGroup;
 
     // Texture coordinate indices into texture groups for each prim with texture
     std::unordered_map<int, std::array<int, 3>>     primTextCoords;
