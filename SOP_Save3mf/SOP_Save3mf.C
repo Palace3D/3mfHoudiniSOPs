@@ -146,47 +146,44 @@ SOP_Save3mf::myTemplateList[] = {
 
 //
 // Generate a pseudo-UUID string using standard C++ randomization since we cannot use Boost
-// or C++20 <uuid>. This generates 15 random bytes and formats them as a standard 8-4-4-4-12
+// or C++20 <uuid>. This generates 16 random bytes and formats them as a standard 8-4-4-4-12
 // hexadecimal UUID string. I'm hoping this is "unique enough."
 //
 std::string generatePseudoUUID() {
-    // Initialize a "Mersenne Twister engine" seeded by a HW source
+    // Initialize a Mersenne Twister engine seeded by a hardware source
     std::random_device rd;
     std::mt19937 generator(rd());
     // Get 16 bytes of random data (128 bits)
-    std::array<uint8_t, 15> random_bytes;
-    // Use a distribution to fill the byte array efficiently
+    std::array<uint8_t, 16> random_bytes;
     for (uint8_t& byte : random_bytes) {
         byte = static_cast<uint8_t>(generator() & 0xFF);
     }
-
     std::stringstream st;
     st << std::hex << std::uppercase << std::setfill('0');
-    // Format the 15 bytes into the 9-4-4-4-12 UUID structure
+    // 8 hex chars (4 bytes)
     for (int i = 0; i < 4; ++i) {
         st << std::setw(2) << static_cast<int>(random_bytes[i]);
     }
     st << '-';
+    // 4 hex chars (2 bytes)
     for (int i = 4; i < 6; ++i) {
         st << std::setw(2) << static_cast<int>(random_bytes[i]);
     }
     st << '-';
-    // Group 3 (2 bytes / 4 chars) - Setting version nibbles 
-    // (This part makes it look like V4, but doesn't guarantee compliance)
-    // Note: To be spec-compliant, we'd need bitwise manipulation, but for
-    // simple ID generation, plain random is often sufficient.
+    // 4 hex chars (2 bytes)
     for (int i = 6; i < 8; ++i) {
         st << std::setw(2) << static_cast<int>(random_bytes[i]);
     }
     st << '-';
+    // 4 hex chars (2 bytes)
     for (int i = 8; i < 10; ++i) {
         st << std::setw(2) << static_cast<int>(random_bytes[i]);
     }
     st << '-';
+    // 12 hex chars (6 bytes)
     for (int i = 10; i < 16; ++i) {
         st << std::setw(2) << static_cast<int>(random_bytes[i]);
     }
-
     return st.str();
 }
 
@@ -1621,26 +1618,21 @@ SOP_Save3mf::doOutput() {
     LOG_DEBUG(this->debug, "In doOutput");
     std::string timestamp = this->timeString;
 
-    // Create files to add to the zip file
     std::ostream *sp;
-    std::filesystem::path tempDirCrossSystem = std::filesystem::temp_directory_path(); // Use tmp dir compatible on Windows as well
-    //std::string tmp_path = std::string("/tmp/") + std::string("3mf_") + timestamp + "/";
+    std::filesystem::path tempDirCrossSystem = std::filesystem::temp_directory_path();
     std::string tmp_path = (tempDirCrossSystem / ("3mf_" + timestamp)).string() + "/";
-    // Note: the / operator is overloaded for std::filesystem::path concatenation and handles
-    // the separator on both windows and linux. It also handles the fact that windows uses \ as a path separator instead of /, so
-    // I don't need to hardcode / between the temp directory and the folder name.
 
     // The file that describes all the kinds of contents we can have.
     std::string contenttypesFile = "[Content_Types].xml";
     std::string str_contenttypes =
-        "<?xml version=\"1.0\" encoding=\"utf-8\"?> " \
-        "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"> " \
-        "<Default Extension=\"jpeg\" ContentType=\"image/jpeg\"/> " \
-        "<Default Extension=\"jpg\" ContentType=\"image/jpeg\"/> " \
-        "<Default Extension=\"model\" ContentType=\"application/vnd.ms-package.3dmanufacturing-3dmodel+xml\"/> " \
-        "<Default Extension=\"png\" ContentType=\"image/png\"/> " \
-        "<Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/> " \
-        "<Default Extension=\"texture\" ContentType=\"application/vnd.ms-package.3dmanufacturing-3dmodeltexture\"/> " \
+        "<?xml version=\"1.0\" encoding=\"utf-8\"?> "
+        "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"> "
+        "<Default Extension=\"jpeg\" ContentType=\"image/jpeg\"/> "
+        "<Default Extension=\"jpg\" ContentType=\"image/jpeg\"/> "
+        "<Default Extension=\"model\" ContentType=\"application/vnd.ms-package.3dmanufacturing-3dmodel+xml\"/> "
+        "<Default Extension=\"png\" ContentType=\"image/png\"/> "
+        "<Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/> "
+        "<Default Extension=\"texture\" ContentType=\"application/vnd.ms-package.3dmanufacturing-3dmodeltexture\"/> "
         "<Default Extension=\"xml\" ContentType=\"application/xml\"/></Types>";
     if (!createIntermediateDirectories(tmp_path + contenttypesFile)) {
         std::cerr << "Error: Could not create path " << tmp_path + contenttypesFile << std::endl;
@@ -1657,13 +1649,13 @@ SOP_Save3mf::doOutput() {
     (*sp) << str_contenttypes;
     contentWriter.close();
 
-    // Relationships for the 3dmodel file
+    // Top-level relationships file
     std::string relsFile = "_rels/.rels";
     std::string str_rels =
-        "<?xml version=\"1.0\" encoding=\"UTF-8\"?> " \
-        "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"> " \
-        "<Relationship Target=\"/3D/3dmodel.model\" Id=\"rel45876482\" " \
-        "Type=\"http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel\" /> " \
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?> "
+        "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"> "
+        "<Relationship Target=\"/3D/3dmodel.model\" Id=\"rel45876482\" "
+        "Type=\"http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel\" /> "
         "</Relationships>";
     if (!createIntermediateDirectories(tmp_path + relsFile)) {
         std::cerr << "Error: Could not create path " << tmp_path + relsFile << std::endl;
@@ -1681,12 +1673,20 @@ SOP_Save3mf::doOutput() {
     (*sp) << str_rels;
     relsWriter.close();
 
-    // Relationships for textures and all the texture files, if any exist.
-    int id = 45876484; // Does this need to be a proper UUID?
+    // Relationships for the 3dmodel file — includes production extension and textures
+    int id = 45876484;
     std::string textRelsFile = "3D/_rels/3dmodel.model.rels";
     std::string str_textRels =
-        "<?xml version=\"1.0\" encoding=\"UTF-8\"?><Relationships " \
-        "xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">";
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
+        "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">"
+        // Declare the production extension as shouldunderstand
+        // I believe this means that parsers that don't understand the production format can safely
+        // ignore the UUIDs in the file, but those that do understand will have the extension
+        // properly declared.
+        "<Relationship Target=\"http://schemas.microsoft.com/3dmanufacturing/production/2015/06\" "
+        "Id=\"rel_production\" "
+        "Type=\"http://schemas.openxmlformats.org/package/2006/relationships/shouldunderstand\"/>";
+
     for (const auto& pair : this->primTextDict) {
         std::string texturePath = pair.first;
         std::string rewritten = std::string("3D/Texture/") + this->primTextRewriteDict[texturePath];
@@ -1698,7 +1698,6 @@ SOP_Save3mf::doOutput() {
             return ErrorCode::ZIP_FAILURE;
         }
         
-        // Resolve opdef: paths to a real temp file before copying
         std::string resolvedTexturePath = texturePath;
         LOG_DEBUG(this->debug, "Starting with resolved TexturePath " << resolvedTexturePath);
         if (texturePath.rfind("opdef:", 0) == 0) {
@@ -1717,7 +1716,6 @@ SOP_Save3mf::doOutput() {
         }
     
         try {
-            //fs::copy(texturePath, tmp_path + rewritten, fs::copy_options::overwrite_existing);
             fs::copy(resolvedTexturePath, tmp_path + rewritten, fs::copy_options::overwrite_existing);
         } catch (const fs::filesystem_error& e) {
             std::cerr << "Error: Filesystem error during copy of texture file: " << e.what() << std::endl;
@@ -1729,13 +1727,17 @@ SOP_Save3mf::doOutput() {
             return ErrorCode::FILE_FAILURE;
         }
         this->files_to_add.push_back({tmp_path + rewritten, rewritten});
-        str_textRels.append("<Relationship Target=\""+ tmp_path + rewritten + "\""
+        // BUG FIX: texture Target should be relative path within archive, not full tmp_path
+        str_textRels.append(
+            "<Relationship Target=\"/" + rewritten + "\""
             + " Id=\"rel" + std::to_string(id)
             + "\" Type=\"http://schemas.microsoft.com/3dmanufacturing/2013/01/3dtexture\" />");
-            ++id;
-        LOG_DEBUG(false, std::string("Texture rels file string is now \n") + str_textRels
-            + std::string("\n"));
+        ++id;
+        LOG_DEBUG(false, std::string("Texture rels file string is now \n") + str_textRels + "\n");
     }
+
+    str_textRels.append("</Relationships>");  // BUG FIX: closing tag was missing!
+
     if (!createIntermediateDirectories(tmp_path + textRelsFile)) {
         std::cerr << "Error: Could not create path " << tmp_path + textRelsFile << std::endl;
         cleanupFiles(tmp_path, this->debugfiles);
@@ -1767,7 +1769,7 @@ SOP_Save3mf::doOutput() {
         cleanupFiles(tmp_path, this->debugfiles);
         return ErrorCode::FILE_FAILURE;
     }
-    if (this->modelOutput.length() < 20) { // Ok, this is arbitrary for now.
+    if (this->modelOutput.length() < 20) {
         std::cerr << "Error: model content is null" << std::endl;
         cleanupFiles(tmp_path, this->debugfiles);
         return ErrorCode::BAD_GEO;
@@ -1778,14 +1780,11 @@ SOP_Save3mf::doOutput() {
     for (const auto& entry : this->files_to_add) {
         LOG_DEBUG(false, "Source path is " + entry.source_path);
         LOG_DEBUG(false, "Archive path is " + entry.archive_path);
-        // std::string file_data = readFileToString(entry.source_path);
-        // LOG_DEBUG(this->debug, file_data + "\n");
     }
 
     save3mfArchive(this->files_to_add);
 
     LOG_DEBUG(this->debug, "Exiting doOutput");
-
     cleanupFiles(tmp_path, this->debugfiles);
     return ErrorCode::SUCCESS;
 }
