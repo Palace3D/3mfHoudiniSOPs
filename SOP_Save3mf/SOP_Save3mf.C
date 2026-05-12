@@ -61,6 +61,7 @@
 #include <FS/FS_Writer.h>
 //#include <UT/UT_Error.h>
 #include <filesystem>
+#include <FS/FS_Reader.h>
 #include <sys/stat.h>
 #include <minizip/zip.h>
 #include <minizip/ioapi.h>
@@ -1098,6 +1099,13 @@ SOP_Save3mf::saveTextures(const GU_Detail* gdp) {
             // Convert texture file path to std::filesystem::path for cross-platform handling
             std::filesystem::path fsPath(textureFilePath.toStdString());
             std::string tFileStr = fsPath.filename().string();
+            // Sanitize filename - replace characters that are problematic in URLs and filenames
+            // This deals with the ? I was getting from opdef filenames that had ? in them as a separator
+            std::replace(tFileStr.begin(), tFileStr.end(), '?', '_');
+            std::replace(tFileStr.begin(), tFileStr.end(), ':', '_');
+            std::replace(tFileStr.begin(), tFileStr.end(), '*', '_');
+            std::replace(tFileStr.begin(), tFileStr.end(), '"', '_');
+            
             std::string suffix = fsPath.extension().string();
             std::string testname = fsPath.stem().string();
             std::string textureFileKey = textureFilePath.toStdString();
@@ -1575,32 +1583,45 @@ SOP_Save3mf::writeHeader(bool material_ext, bool boolean_ext, bool production_ex
     return;
 }
 
-// XXXXXXXXX
-#include <FS/FS_Reader.h>
 
-bool extractOpdefTexture(const UT_String &opdef_path, const UT_String &out_path) {
+//
+// Fix the internal opdef filenames into something we can use in an export.
+//
+bool
+extractOpdefTexture(const UT_String &opdef_path, const UT_String &out_path) {
 
     FS_Reader reader(opdef_path);
-    if (!reader.isGood())
-    {
+    if (!reader.isGood()) {
         std::cerr << "Error: Could not open opdef path: " << opdef_path << std::endl;
         return false;
     }
 
     std::ofstream out(out_path.c_str(), std::ios::binary);
-    if (!out.is_open())
-    {
+    if (!out.is_open()) {
         std::cerr << "Error: Could not open output path: " << out_path << std::endl;
         return false;
     }
 
     UT_IStream *stream = reader.getStream();
     char buf[4096];
-    while (!stream->isEof())
-    {
+    while (!stream->isEof()) {
         exint bytesRead = stream->bread(buf, sizeof(buf));
-        if (bytesRead > 0)
+        if (bytesRead > 0) {
             out.write(buf, bytesRead);
+            if (!out.good()) {
+                std::cerr << "Error: Failed writing to output file: " << out_path << std::endl;
+                return false;
+            }
+        } else if (bytesRead < 0) {
+            std::cerr << "Error: Failed reading from opdef stream: " << opdef_path << std::endl;
+            return false;
+        }
+    }
+
+    out.close();
+    if (!out.good()) {
+        std::cerr << "Error: Failed closing output file: " << out_path << std::endl;
+        return false;
     }
 
     return true;
@@ -1682,7 +1703,7 @@ SOP_Save3mf::doOutput() {
         // Declare the production extension as shouldunderstand
         // I believe this means that parsers that don't understand the production format can safely
         // ignore the UUIDs in the file, but those that do understand will have the extension
-        // properly declared.
+        // properly declared.              
         "<Relationship Target=\"http://schemas.microsoft.com/3dmanufacturing/production/2015/06\" "
         "Id=\"rel_production\" "
         "Type=\"http://schemas.openxmlformats.org/package/2006/relationships/shouldunderstand\"/>";
