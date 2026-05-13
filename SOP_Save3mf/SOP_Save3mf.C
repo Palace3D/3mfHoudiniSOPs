@@ -690,13 +690,27 @@ SOP_Save3mf::write3mfObjectMesh(const GU_Detail* gdp) {
 
     this->modelOutput.append(" <mesh>\n");
 
-    // write all the vertices (in 3mf lingo -- points in Houdini lingo)
-    // We're assuming that the vertices
+    // write all the vertices (that's in 3mf lingo. They are points in Houdini lingo)
     this->modelOutput.append("  <vertices>\n");
 
     GA_Size numPts = gdp->getNumPoints();
     LOG_DEBUG(this->debug, "There are " + std::to_string(numPts) + " vertices");
-
+    //LOG_DEBUG(true, "There are " + std::to_string(numPts) + " vertices");
+    
+    for (GA_Iterator it(gdp->getPointRange()); !it.atEnd(); ++it) {
+        GA_Offset ptOffset = *it;
+        UT_Vector3 pos = gdp->getPos3(ptOffset);
+        {
+            std::stringstream st;
+            st << "    <vertex x=\"" << std::setw(3) << pos[0] << "\"";
+            st << " y=\"" << std::setw(3) << pos[1] << "\"";
+            //st << " z=\"" << std::setw(3) << pos[2] << "\"/>\n";
+            st << " z=\"" << std::setw(3) << pos[2] << "\"/>\n";
+            //st << std::hex << std::uppercase << std::setfill('0');
+            this->modelOutput.append(st.str());
+        }
+    }
+/*
     for (GA_Iterator it(GA_Range(gdp->getPointMap(), GA_Offset(0), GA_Offset(numPts))); !it.atEnd(); ++it) {
         GA_Index pIndex = it.getIndex();
         UT_Vector3 pos = gdp->getPos3(*it);
@@ -710,13 +724,14 @@ SOP_Save3mf::write3mfObjectMesh(const GU_Detail* gdp) {
             this->modelOutput.append(st.str());
         }
     }
+*/
 
     this->modelOutput.append("  </vertices>\n");
 
     // write all the triangles
     GA_Size numPrims = gdp->getNumPrimitives();
     LOG_DEBUG(this->debug, "In write we have " << numPrims << " primitives.");
-    LOG_DEBUG(this->debug, "There are " + std::to_string(numPrims) + " triangles");
+    //LOG_DEBUG(true, "In write we have " << numPrims << " primitives.");
     this->modelOutput.append("  <triangles>\n");
 
     //printPrimTextCoords(this->primTextCoords, this->debug);
