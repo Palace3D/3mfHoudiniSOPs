@@ -2082,7 +2082,7 @@ SOP_Read3mf::parseModel(std::string the_model) {
             std::cerr << "Error: No geometry detail for an object." << std::endl;
             return ErrorCode::OTHER;
         }
-
+/*
         for (const UT_Matrix4& mat : transformList) {
             GA_Index startIdx = this->gdp->getNumPoints();
             this->gdp->merge(*sourceGdp);
@@ -2094,6 +2094,18 @@ SOP_Read3mf::parseModel(std::string the_model) {
 
                 GA_Range newPoints(this->gdp->getPointMap(), startIdx, endIdx);
 
+                this->gdp->transform(finalMat, GA_Range(), newPoints, false);
+            }
+        }
+*/
+        for (const UT_Matrix4& mat : transformList) {
+            GA_Offset startOff = this->gdp->getNumPointOffsets();
+            this->gdp->merge(*sourceGdp);
+            GA_Offset endOff = this->gdp->getNumPointOffsets();
+            if (endOff > startOff) {
+                UT_Matrix4 finalMat(mat);
+                finalMat *= scale_matrix;
+                GA_Range newPoints(this->gdp->getPointMap(), startOff, endOff);
                 this->gdp->transform(finalMat, GA_Range(), newPoints, false);
             }
         }
@@ -4007,7 +4019,7 @@ SOP_Read3mf::handleComponent(XMLElement* element, int parentID) {
         std::cerr << "Error: No geometry detail for an object or objects." << std::endl;
         return ErrorCode::OTHER;
     }
-
+/*
     // Capture current point count before merge
     GA_Offset start_pt_off = parentGdp->getNumPoints();
 
@@ -4019,6 +4031,16 @@ SOP_Read3mf::handleComponent(XMLElement* element, int parentID) {
 
     // Create the range using the offsets
     GA_Range new_points(parentGdp->getPointMap(), start_pt_off, end_pt_off);
+*/    
+    // Capture current point offset before merge
+    GA_Offset start_pt_off = parentGdp->getNumPointOffsets();
+    // Do the merge
+    parentGdp->merge(*sourceGdp);
+    // Capture new offset
+    GA_Offset end_pt_off = parentGdp->getNumPointOffsets();
+    // Create the range using the offsets
+    GA_Range new_points(parentGdp->getPointMap(), start_pt_off, end_pt_off);
+
 
     // Get component object's transform
     UT_Matrix4 transform;
