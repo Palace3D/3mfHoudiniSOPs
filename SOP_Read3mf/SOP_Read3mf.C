@@ -1,4 +1,10 @@
 /*
+ *
+ * Copyright (c) 2026 Palace3D
+ * Extensions for 3MF import/export
+ *
+ * Based on SideFX HDK samples:
+ *
  * Copyright (c) 2025
  *	Side Effects Software Inc.  All rights reserved.
  *
@@ -166,7 +172,7 @@ static PRM_Name names[] = {
     PRM_Name("debug", "Debug"),         // Some extra info printed to std::clog
     PRM_Name("timer", "Timer"),         // Record how long it takes to read in the model
     PRM_Name("filename", "File Name"),  // 3mf file name
-    PRM_Name("assets", "Asset Folding"),// Folder in which to unpack the 3mf file
+    PRM_Name("assets", "Asset Folder"),// Folder in which to unpack the 3mf file
     PRM_Name("readBtn", "Read"),        // Read it
 };
 

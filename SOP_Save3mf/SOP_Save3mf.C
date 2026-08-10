@@ -1,4 +1,10 @@
 /*
+ *
+ * Copyright (c) 2026 Palace3D
+ * Extensions for 3MF import/export
+ *
+ * Based on SideFX HDK samples:
+ *
  * Copyright (c) 2025
  *	Side Effects Software Inc.  All rights reserved.
  *
@@ -710,21 +716,6 @@ SOP_Save3mf::write3mfObjectMesh(const GU_Detail* gdp) {
             this->modelOutput.append(st.str());
         }
     }
-/*
-    for (GA_Iterator it(GA_Range(gdp->getPointMap(), GA_Offset(0), GA_Offset(numPts))); !it.atEnd(); ++it) {
-        GA_Index pIndex = it.getIndex();
-        UT_Vector3 pos = gdp->getPos3(*it);
-        {
-            std::stringstream st;
-            st << "    <vertex x=\"" << std::setw(3) << pos[0] << "\"";
-            st << " y=\"" << std::setw(3) << pos[1] << "\"";
-            //st << " z=\"" << std::setw(3) << pos[2] << "\"/>\n";
-            st << " z=\"" << std::setw(3) << pos[2] << "\"/>\n";
-            //st << std::hex << std::uppercase << std::setfill('0');
-            this->modelOutput.append(st.str());
-        }
-    }
-*/
 
     this->modelOutput.append("  </vertices>\n");
 

@@ -1,4 +1,10 @@
 /*
+ *
+ * Copyright (c) 2026 Palace3D
+ * Extensions for 3MF import/export
+ *
+ * Based on SideFX HDK samples:
+ *
  * Copyright (c) 2025
  *	Side Effects Software Inc.  All rights reserved.
  *
