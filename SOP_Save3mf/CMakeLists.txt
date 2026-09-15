@@ -20,7 +20,15 @@ set( library_name SOP_Save3mf )
 # MY ADDITIONS!
 # Use CMake's built-in module to find the ZLIB library (Minizip's dependency)
 find_package( ZLIB REQUIRED )
-find_library( MINIZIP_LIBRARY NAMES minizip minizip-ng-compat minizip-ng PATHS /usr/lib64 )
+
+if( WIN32 )
+    find_package( minizip CONFIG REQUIRED )
+    set( MINIZIP_LIBRARY MINIZIP::minizip )
+else()
+    find_library( MINIZIP_LIBRARY NAMES minizip minizip-ng-compat minizip-ng PATHS /usr/lib64 )
+endif()
+
+set( library_name SOP_Save3mf )
 
 # Add a library and its source files.
 add_library( ${library_name} SHARED
@@ -37,8 +45,11 @@ target_link_libraries( ${library_name} Houdini ${MINIZIP_LIBRARY} )
 # MY ADDITIONS are the minizip include
 target_include_directories( ${library_name} PRIVATE
     ${CMAKE_CURRENT_BINARY_DIR}
-    /usr/include/minizip
 )
+if( NOT WIN32 )
+    target_include_directories( ${library_name} PRIVATE /usr/include/minizip )
+endif()
+
 
 # Sets several common target properties, such as the library's output directory.
 houdini_configure_target( ${library_name} )

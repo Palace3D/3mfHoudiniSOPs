@@ -134,9 +134,9 @@ SOP_Save3mf::myTemplateList[] = {
     PRM_Template(PRM_TOGGLE,    1, &names[2], &debugit, 0, 0, 0, 0, 1, "Print debug information."),
     PRM_Template(PRM_TOGGLE,    1, &names[3], &timeit, 0, 0, 0, 0, 1, "Report the time it took to save the model."),
     PRM_Template(PRM_TOGGLE,    1, &names[4], &debugfilesn, 0, 0, 0, 0, 1, "Preserve model files in /tmp for inspection."),
-    PRM_Template(PRM_STRING,	1, &names[5], &meshn, 0, 0, 0, 0, 1, "Give a name to the mesh in the 3mf file."),
-    PRM_Template(PRM_FILE_E,	1, &names[6], &filen, 0, 0, 0, 0, 1, "Name of the 3mf output file."),
-    PRM_Template(PRM_STRING,    1, &names[7], &titlen, 0, 0, 0, 0, 1, "Optional title to include in the 3mf header."),
+    PRM_Template(PRM_STRING,	1, &names[5], &meshn, 0, 0, 0, 0, 1, "Give a name to the mesh in the 3mf file. If this parameter is empty and a detail string attribute out_mesh is set, that attribute value will be used."),
+    PRM_Template(PRM_FILE_E,	1, &names[6], &filen, 0, 0, 0, 0, 1, "Name of the 3mf output file. If this parameter is empty and a detail string attribute out_filename is set, then that attribute value will be used."),
+    PRM_Template(PRM_STRING,    1, &names[7], &titlen, 0, 0, 0, 0, 1, "Optional title to include in the 3mf header. If this parameter is empty and a detail string attribute out_title is set, that attribute value will be used."),
     PRM_Template(PRM_STRING,    1, &names[8], &descriptionn, 0, 0, 0, 0, 1, "Optional description to include in the 3mf header."),
     PRM_Template(PRM_STRING,    1, &names[9], &designern, 0, 0, 0, 0, 1, "Optional designer's name to include in the 3mf header."),
     PRM_Template(PRM_CALLBACK,  1, &names[10], 0, 0, 0, &SOP_Save3mf::save, 0, 1, "Save the 3mf model."),
@@ -479,6 +479,49 @@ SOP_Save3mf::cookMySop(OP_Context &context)
     this->TITLE(this->title, t);
     this->DESCRIPTION(this->description, t);
     this->DESIGNER(this->designer, t);
+
+    // If the incoming geometry carries detail attributes named "out_meshname"
+    // or "out_filename" or "out_title", and if the associated parameters are empty,
+    // then use the attributes for the parameter values. This lets
+    // upstream nodes (e.g. a wrangle building a name from other parameters)
+    // drive these fields dynamically without needing an expression that would
+    // re-cook this node's own (already-locked) input chain.
+    GA_ROHandleS filename_attr(gdp, GA_ATTRIB_DETAIL, "out_filename");
+    if (filename_attr.isValid()) {
+        if (!this->filename.empty()) {
+            LOG_DEBUG(this->debug, "Filename attr is valid but filename parameter is set.");
+            addWarning(SOP_MESSAGE, "File Name parameter is set, but an "
+                "'out_filename' detail attribute is also present on the input "
+                "geometry; the parameter value will be used instead of the attribute.");
+        }
+        this->filename = filename_attr.get(GA_Offset(0)).toStdString();
+        LOG_DEBUG(this->debug, "Using filename from detail attribute: " << this->filename);
+    }
+
+    GA_ROHandleS mesh_attr(gdp, GA_ATTRIB_DETAIL, "out_meshname");
+    if (mesh_attr.isValid()) {
+        if (!this->mesh.empty()) {
+            LOG_DEBUG(this->debug, "Mesh attr is valid but mesh parameter is set.");
+            addWarning(SOP_MESSAGE, "Mesh Name parameter is set, but an "
+                "'out_meshname' detail attribute is also present on the input "
+                "geometry; the parameter value will be used instead of the attribute.");
+        }
+        this->mesh = mesh_attr.get(GA_Offset(0)).toStdString();
+        LOG_DEBUG(this->debug, "Using mesh name from detail attribute: " << this->mesh);
+    }
+
+    GA_ROHandleS title_attr(gdp, GA_ATTRIB_DETAIL, "out_title");
+    if (title_attr.isValid()) {
+        if (!this->title.empty()) {
+            LOG_DEBUG(this->debug, "Title attr is valid but title parameter is set.");
+            addWarning(SOP_MESSAGE, "Title parameter is set, but an "
+                "'out_title' detail attribute is also present on the input "
+                "geometry; the parameter value will be used instead of the attribute.");
+        } else {
+            this->title = title_attr.get(GA_Offset(0)).toStdString();
+            LOG_DEBUG(this->debug, "Using title from detail attribute: " << this->title);
+        }
+    }    
 
     this->start = generateTimestamp();
     this->timeString = generateTimestampString();
@@ -1531,7 +1574,7 @@ SOP_Save3mf::defaultColor(const GU_Detail* gdp) {
             std::stringstream st;
             st << " <m:color color=\"#";
             st << std::hex << std::uppercase << std::setfill('0');
-            st << std::setw(2) << DEFAULT_COLOR[0];;
+            st << std::setw(2) << DEFAULT_COLOR[0];
             st << std::setw(2) << DEFAULT_COLOR[1];
             st << std::setw(2) << DEFAULT_COLOR[2];
             st << "\"/>\n";
@@ -1826,7 +1869,11 @@ SOP_Save3mf::save3mfArchive(const std::vector<SOP_Save3mf::FileEntry>& files_to_
     // Setup Compression Parameters
     const int method = Z_DEFLATED;
     const int level = Z_DEFAULT_COMPRESSION;
+#ifdef _WIN32
+    const uint32_t desired_mode = 0100644; // S_IFREG | 0644 — hardcoded since Windows headers lack S_IFREG
+#else
     const mode_t desired_mode = S_IFREG | 0644;
+#endif
 
     zip_fileinfo zfi;
     memset(&zfi, 0, sizeof(zfi)); // Initialize structure memory to zero

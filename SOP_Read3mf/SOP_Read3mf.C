@@ -71,6 +71,7 @@
 #include <filesystem>
 #include <sys/stat.h>
 #include <minizip/zip.h>
+#include <minizip/unzip.h>
 #include <minizip/ioapi.h>
 #include <zlib.h> 
 #include "tinyxml2.h"

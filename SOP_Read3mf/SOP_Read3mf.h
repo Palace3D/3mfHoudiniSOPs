@@ -40,6 +40,14 @@
 
 #include <string.h>
 #include <stdbool.h>
+#include <string>
+#include <vector>
+#include <array>
+#include <map>
+#include <unordered_map>
+#include <chrono>
+#include <sstream>
+#include <iostream>
 #include <SOP/SOP_Node.h>
 #include "tinyxml2.h"
 #include <atomic>

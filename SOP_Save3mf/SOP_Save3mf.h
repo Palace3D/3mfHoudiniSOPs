@@ -42,6 +42,11 @@
 #include <stdbool.h>
 #include <unordered_map>
 #include <vector>
+#include <string>
+#include <array>
+#include <chrono>
+#include <atomic>
+#include <iostream>
 #include <SOP/SOP_Node.h>
 
 //
