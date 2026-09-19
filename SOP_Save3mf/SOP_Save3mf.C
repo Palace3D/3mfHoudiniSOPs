@@ -493,9 +493,10 @@ SOP_Save3mf::cookMySop(OP_Context &context)
             addWarning(SOP_MESSAGE, "File Name parameter is set, but an "
                 "'out_filename' detail attribute is also present on the input "
                 "geometry; the parameter value will be used instead of the attribute.");
+        } else {
+            this->filename = filename_attr.get(GA_Offset(0)).toStdString();
+            LOG_DEBUG(this->debug, "Using filename from detail attribute: " << this->filename);
         }
-        this->filename = filename_attr.get(GA_Offset(0)).toStdString();
-        LOG_DEBUG(this->debug, "Using filename from detail attribute: " << this->filename);
     }
 
     GA_ROHandleS mesh_attr(gdp, GA_ATTRIB_DETAIL, "out_meshname");
@@ -505,9 +506,10 @@ SOP_Save3mf::cookMySop(OP_Context &context)
             addWarning(SOP_MESSAGE, "Mesh Name parameter is set, but an "
                 "'out_meshname' detail attribute is also present on the input "
                 "geometry; the parameter value will be used instead of the attribute.");
+        } else {
+            this->mesh = mesh_attr.get(GA_Offset(0)).toStdString();
+            LOG_DEBUG(this->debug, "Using mesh name from detail attribute: " << this->mesh);
         }
-        this->mesh = mesh_attr.get(GA_Offset(0)).toStdString();
-        LOG_DEBUG(this->debug, "Using mesh name from detail attribute: " << this->mesh);
     }
 
     GA_ROHandleS title_attr(gdp, GA_ATTRIB_DETAIL, "out_title");
