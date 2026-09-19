@@ -1,0 +1,96 @@
+= Read3mf =
+
+#type: node
+#context: sop
+#internal: hdk_read3mf
+
+"""Reads a 3mf file from disk into Houdini geometry."""
+
+== Overview ==
+
+Read3mf unpacks a 3mf archive and imports its geometry, along with
+color and texture information where present.
+
+WARNING:
+    Multi-property triangles (a triangle referencing more than one
+    property/resource at once, per the 3mf Materials Specification)
+    are not currently supported on import.
+
+== Materials and Shaders ==
+
+If the 3mf file has texture or multi-property data (and Only
+Geometry is off), Read3mf creates a subnet alongside itself to hold
+the materials it builds, named after the node with `_subnet`
+appended (e.g. a node named `read3mf1` gets a sibling subnet named
+`read3mf1_subnet`). Inside that subnet is a matnet named
+`3mf_materials` containing the actual shader(s).
+
+NOTE:
+    The subnet is destroyed and rebuilt fresh every time Read is
+    pressed, so re-reading a file doesn't leave stale, duplicate
+    shaders behind.
+
+    It is not automatically deleted if you delete the Read3mf node
+    itself — this is deliberate, since Houdini doesn't guarantee an
+    order for deleting nodes during scene teardown, and destroying
+    it from the node's own destructor risked crashes. Delete the
+    subnet by hand if you no longer need it.
+
+@parameters
+
+Flip Normals:
+    #id: flip
+    Flip 3mf normals to match Houdini's winding order, which is
+    opposite 3mf's.
+
+Apply Build Instructions:
+    #id: build
+    Render only the objects listed in the 3mf file's `<build>`
+    instructions, applying their transforms. This is how a valid
+    3mf file is meant to be assembled. If turned off, the node
+    instead renders every object defined in the file's resources,
+    regardless of whether it's referenced by a build item — each
+    one exactly once, at its own identity transform (its original,
+    local placement, ignoring whatever transform a build item would
+    have applied). Useful for debugging, or for inspecting resources
+    that aren't referenced by any build item at all.
+
+Only Geometry:
+    #id: geo
+    Import geometry only — skip color and texture information.
+
+Shader Override:
+    #id: overrideShader
+    Use a single shader for multiple textures on import, recording
+    the per-primitive texture assignment in a `material_override`
+    attribute rather than assigning a distinct shader per texture.
+    Intended to pair with [Node:sop/hdk_save3mf]'s own Uses Shader
+    Override option, so a round-tripped part re-exports its texture
+    assignments correctly.
+
+Debug:
+    #id: debug
+    Print extra diagnostic information to the console (`std::clog`)
+    while reading.
+
+Timer:
+    #id: timer
+    Report how long the read operation took.
+
+File Name:
+    #id: filename
+    Path to the 3mf file to read.
+
+Asset Folder:
+    #id: assets
+    Folder into which the 3mf archive is unpacked (textures and
+    other referenced files land here during the read).
+
+Read:
+    #id: readBtn
+    Triggers the actual read. Read3mf only (re-)imports geometry
+    when this button is pressed.
+
+@related
+
+* [Node:sop/hdk_save3mf]

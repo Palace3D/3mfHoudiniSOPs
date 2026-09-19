@@ -80,6 +80,25 @@ set `HOUDINI_DSO_ERROR=2` in your environment and launch
 `hbatch.exe` (not `houdinifx.exe` — the GUI executable doesn't
 print to a console) from a terminal.
 
+## Node Help
+
+Each SOP has help documentation, written in SideFX's wiki markup
+format, alongside its source: `SOP_Save3mf/hdk_save3mf.txt` and
+`SOP_Read3mf/hdk_read3mf.txt`.
+
+To make Houdini show this as real, working node help (right-click
+a node > Help), move both files into Houdini's shared node-help
+folder:
+```
+$HOUDINI_USER_PREF_DIR/help/nodes/sop/
+```
+e.g. `%HOMEPATH%\Documents\houdiniX.Y\help\nodes\sop\` on Windows,
+or `$HOME/houdiniX.Y/help/nodes/sop/` on Fedora/Linux. The `help`,
+`nodes`, and `sop` folders don't exist by default — create them if
+needed. No restart required; Houdini's help browser picks these up
+on demand. The filenames must match the SOPs' internal operator
+names (`hdk_save3mf`, `hdk_read3mf`), not their Tab-menu labels.
+
 ## Dependencies
 
 Vendored in this repository (no separate install needed):

@@ -1,0 +1,99 @@
+= Save3mf =
+
+#type: node
+#context: sop
+#internal: hdk_save3mf
+
+"""Saves geometry to disk as a 3mf file."""
+
+== Overview ==
+
+Save3mf writes the incoming geometry out as a 3mf file, following
+the 3mf Core Specification and most of the 3mf Materials
+Specification. It supports per-point, per-vertex, per-primitive, and
+detail color, along with file-based and base-color textures.
+
+The whole input is currently written out as a single 3mf object.
+
+TIP:
+    You can drive the Mesh Name, File Name, and Title from upstream
+    data instead of typing them in by hand. Add a Detail Wrangle
+    before this node and set the string detail attributes
+    `out_mesh`, `out_filename`, and `out_title` to whatever your
+    setup computes. This lets you compute the strings directly in
+    VEX from the geometry's own attributes and content, rather than
+    having to reference that data back through a parameter
+    expression.
+
+    If you leave the corresponding parameter blank, the detail
+    attribute is used. If you type a value directly into the
+    parameter, that value always wins over the attribute.
+
+@parameters
+
+Flip Normals:
+    #id: flip
+    Flip Houdini normals to match 3mf's winding order, which is
+    opposite Houdini's.
+
+Uses Shader Override:
+    #id: usedShaderOverride
+    Use a single shader across many textures. Intended for parts
+    that were imported via [Node:sop/hdk_read3mf] with its own
+    Shader Override option enabled, so the per-primitive texture
+    assignments captured on import (in the `material_override`
+    attribute) are read back out correctly on export.
+
+Debug:
+    #id: debug
+    Print extra diagnostic information to the console (`std::clog`)
+    while saving.
+
+Timer:
+    #id: timer
+    Report how long the save operation took.
+
+Debug Files:
+    #id: debugfiles
+    Leave the intermediate files (before they're zipped into the
+    final `.3mf`) in the temp directory for inspection, instead of
+    cleaning them up after the save.
+
+Mesh Name:
+    #id: mesh
+    Name given to the mesh inside the 3mf file. Overridden by the
+    `out_mesh` detail attribute if this is left blank — see the tip
+    above.
+
+File Name:
+    #id: filename
+    Path to the 3mf file to write. A `.3mf` extension is added
+    automatically if not already present. Overridden by the
+    `out_filename` detail attribute if this is left blank — see the
+    tip above.
+
+Title (optional):
+    #id: title
+    Optional title written into the 3mf file's metadata header.
+    Overridden by the `out_title` detail attribute if this is left
+    blank — see the tip above.
+
+Description (optional):
+    #id: description
+    Optional description written into the 3mf file's metadata
+    header.
+
+Designer (optional):
+    #id: designer
+    Optional designer name written into the 3mf file's metadata
+    header.
+
+Save:
+    #id: saveBtn
+    Triggers the actual write. Save3mf only writes geometry when
+    this button is pressed — simply having the node in the network
+    does not write a file.
+
+@related
+
+* [Node:sop/hdk_read3mf]
