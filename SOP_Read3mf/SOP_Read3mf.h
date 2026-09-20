@@ -87,7 +87,8 @@ namespace HDK_Sample {
     enum class MultiType {
         COLOR = 0,  // color group
         BASE,       // base material group
-        TEXTURE     // texture group
+        TEXTURE,    // texture group
+        UNSUPPORTED // resource type we don't parse (e.g. compositematerials)
     };
 
     // Quadtuple of possible attribute handles we might need per layer

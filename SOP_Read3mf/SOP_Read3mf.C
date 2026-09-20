@@ -2161,6 +2161,7 @@ SOP_Read3mf::handleResourcesForSubnet(XMLElement* element) {
             } else if (tag_name == "basematerials") {
                 err = handleBasematerials(descendant);
             } else if (tag_name == "m:multiproperties") {
+		std::cerr << "Warning: We do not yet handle multi-properties correctly, so results might be suspect." << std::endl;
                 err = handleMultiproperties(descendant);
             } else if (tag_name == "m:compositematerials") {
                 std::cerr << "Warning: We do not yet handle composite materials, so results might be suspect." << std::endl;
@@ -3367,6 +3368,9 @@ SOP_Read3mf::handleMultiproperties(XMLElement* element) {
             }
 
 
+        } else {
+            LOG_DEBUG(this->debug, "Layer " << layer << " is an unsupported resource type (not color/basematerial/texture).");
+            multiTypes.push_back(MultiType::UNSUPPORTED);
         }
         if (first) {
             first = false;
@@ -3473,6 +3477,13 @@ SOP_Read3mf::handleMultiproperties(XMLElement* element) {
                 pindicesList.push_back(static_cast<int>(val));
                 pindices_cstr = next; // Move the pointer to the start of the next number
             }
+	    // Per the 3MF Materials spec, a single pindices value applies to every layer
+	    // when a multiproperties group has more than one.
+	    if (pindicesList.size() == 1 && layersList.size() > 1) {
+		int singleValue = pindicesList[0]; // copy out first, to avoid assign() aliasing its own storage
+    		pindicesList.assign(layersList.size(), singleValue);
+	    }
+
             /*
             // Use this instead of the previous loop to avoid a problem if there's a trailing space
             // that strtol misses and then next gets set to that space... XXXX
@@ -3622,12 +3633,20 @@ SOP_Read3mf::colorFromMulti(const MultiData &multiData, int pindex, PixelColor &
         if (multiTypes[i] == MultiType::COLOR) {
             LOG_DEBUG(this->debug, "For group " << pid << " it's color");
             LOG_DEBUG(this->debug, "and we're using index " << index);
+	    if (colorDict.find(pid) == colorDict.end() || index >= static_cast<int>(colorDict.at(pid).size())) {
+    		std::cerr << "Error: Invalid colorgroup id or index in multi-property layer." << std::endl;
+    		return ErrorCode::OTHER;
+	    }
             PixelColor color = colorDict[pid][index];
             LOG_DEBUG(this->debug, "and the color is " << color);
             colorsToBlend.push_back(color);
         } else if (multiTypes[i] == MultiType::BASE) {
             LOG_DEBUG(this->debug, "For group " << pid << " it's base");
             LOG_DEBUG(this->debug, "and we're using index " << index);
+	    if (basematDict.find(pid) == basematDict.end() || index >= static_cast<int>(basematDict.at(pid).size())) {
+    		std::cerr << "Error: Invalid basemat id or index in multi-property layer." << std::endl;
+    		return ErrorCode::OTHER;
+	    }
             PixelColor color = basematDict[pid][index];
             LOG_DEBUG(this->debug, "and the color is " << color);
             colorsToBlend.push_back(color);
@@ -4506,7 +4525,7 @@ SOP_Read3mf::handleTriangle(XMLElement* element, int& numTriangles, const int ob
             triangleState.originalTexId = itt->second.originalTexId;
             LOG_DEBUG(this->debug, "originalTexId = " << triangleState.originalTexId);
             if (!coordArray->size()) {
-                std::cerr << "Error: Array of uv corrdinates for this texture group has size 0" << std::endl;
+                std::cerr << "Error: Array of uv coordinates for this texture group has size 0" << std::endl;
                 return ErrorCode::OTHER;
             }
             for (int i = 0; i < coordArray->size(); ++i) {
@@ -4717,8 +4736,12 @@ SOP_Read3mf::handleTriangle(XMLElement* element, int& numTriangles, const int ob
                 if (&texture_h.getAttribute()->getIndexMap().getDetail() != objGdp) {
                     std::cerr << "Error: Handle belongs to a different detail!" << std::endl;
                     return ErrorCode::OTHER;
-                }                
-                if (setTextureAttrs(objGdp, groupID, coordArray, poly, p1, p2, p3, (*attrHandles)[i].UV_h) != ErrorCode::SUCCESS) {
+                }
+
+		int t1 = (*multiPindices)[p1][i];
+		int t2 = (*multiPindices)[p2][i];
+		int t3 = (*multiPindices)[p3][i];
+		if (setTextureAttrs(objGdp, groupID, coordArray, poly, t1, t2, t3, (*attrHandles)[i].UV_h) != ErrorCode::SUCCESS) {
                     std::cerr << "Error: Unable to set multi texture attributes on triangle " << " for object id " << objID << std::endl;
                     return ErrorCode::OTHER;
                 }
@@ -4731,7 +4754,7 @@ SOP_Read3mf::handleTriangle(XMLElement* element, int& numTriangles, const int ob
                     if (triangleState.texturePath) {
                         std::string opaqueTexturePath;
                         LOG_DEBUG(this->debug, "Calling makeOpaqueTexture with triangleState " << triangleState);
-                        if (makeOpaqueTexture(groupID, triangleState.texturePath ? triangleState.texturePath->buffer() : "", opaqueTexturePath)
+                        if (makeOpaqueTexture((*multiPids)[pid], triangleState.texturePath ? triangleState.texturePath->buffer() : "", opaqueTexturePath)
                             != ErrorCode::SUCCESS) {
                             std::cerr << "Error: Unable to make opaque texture" << std::endl;
                             return ErrorCode::OTHER;

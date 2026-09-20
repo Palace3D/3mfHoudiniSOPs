@@ -14,7 +14,13 @@ color and texture information where present.
 WARNING:
     Multi-property triangles (a triangle referencing more than one
     property/resource at once, per the 3mf Materials Specification)
-    are not currently supported on import.
+    are not currently supported on import. Many examples will work,
+    but not all.
+
+WARNING:
+    The Composite Materials extension (`<m:compositematerials>`) is
+    not supported. A multiproperties layer that references a
+    composite-materials resource is cleanly rejected with an error.
 
 == Materials and Shaders ==
 

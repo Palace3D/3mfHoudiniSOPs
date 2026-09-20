@@ -114,3 +114,11 @@ Not vendored — install via your platform's package manager
 ## Status and Limitations
 
 - We currently cannot import 3mf files using multi-properties.
+  Many examples will work, but not all — this is a known,
+  ongoing limitation (currently caused by how layers are being
+  mapped onto Houdini shaders).
+- We do not correctly handle 3mf files that use the Composite
+  Materials extension (`<m:compositematerials>`). A multiproperties
+  layer referencing a composite-materials resource is not parsed as
+  color, base material, or texture, so it's cleanly rejected with an
+  error rather than silently misinterpreted.
