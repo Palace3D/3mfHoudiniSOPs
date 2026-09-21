@@ -131,9 +131,9 @@ PRM_Template
 SOP_Save3mf::myTemplateList[] = {
     PRM_Template(PRM_TOGGLE,	1, &names[0], &flipit, 0, 0, 0, 0, 1, "Flip Houdini normals to match 3mf normals."),
     PRM_Template(PRM_TOGGLE,    1, &names[1], &usedOverride, 0, 0, 0, 0, 1, "Uses a single shader for many textures."),
-    PRM_Template(PRM_TOGGLE,    1, &names[2], &debugit, 0, 0, 0, 0, 1, "Print debug information."),
+    PRM_Template(PRM_Type(PRM_TOGGLE) | PRM_TYPE_INVISIBLE,    1, &names[2], &debugit, 0, 0, 0, 0, 1, "Print debug information."),
     PRM_Template(PRM_TOGGLE,    1, &names[3], &timeit, 0, 0, 0, 0, 1, "Report the time it took to save the model."),
-    PRM_Template(PRM_TOGGLE,    1, &names[4], &debugfilesn, 0, 0, 0, 0, 1, "Preserve model files in /tmp for inspection."),
+    PRM_Template(PRM_TOGGLE,    1, &names[4], &debugfilesn, 0, 0, 0, 0, 1, "Preserve intermediate model files in your temp folder for inspection."),
     PRM_Template(PRM_STRING,	1, &names[5], &meshn, 0, 0, 0, 0, 1, "Give a name to the mesh in the 3mf file. If this parameter is empty and a detail string attribute out_mesh is set, that attribute value will be used."),
     PRM_Template(PRM_FILE_E,	1, &names[6], &filen, 0, 0, 0, 0, 1, "Name of the 3mf output file. If this parameter is empty and a detail string attribute out_filename is set, then that attribute value will be used."),
     PRM_Template(PRM_STRING,    1, &names[7], &titlen, 0, 0, 0, 0, 1, "Optional title to include in the 3mf header. If this parameter is empty and a detail string attribute out_title is set, that attribute value will be used."),
@@ -454,8 +454,7 @@ SOP_Save3mf::cookMySop(OP_Context &context)
 {
     fpreal t = context.getTime();
     UT_Console::initConsole();
-    LOG_DEBUG(this->debug, "Entering cookMySop");
-
+    
     // We must lock our inputs before we try to access their geometry.
     // OP_AutoLockInputs will automatically unlock our inputs when we return.
     // NOTE: Don't call unlockInputs yourself when using this!
@@ -472,13 +471,14 @@ SOP_Save3mf::cookMySop(OP_Context &context)
     this->debugfiles = this->DEBUGFILES(t);
     this->flip = this->FLIP(t);
     this->usedShaderOverride = this->OVERRIDE(t);
-    LOG_DEBUG(this->debug, "Set usedShaderOverride to " << this->usedShaderOverride);
     this->timer = this->TIMER(t);
     this->MESH(this->mesh, t);
     this->FILENAME(this->filename, t);
     this->TITLE(this->title, t);
     this->DESCRIPTION(this->description, t);
     this->DESIGNER(this->designer, t);
+
+    LOG_DEBUG(this->debug, "Entering cookMySop");
 
     // If the incoming geometry carries detail attributes named "out_meshname"
     // or "out_filename" or "out_title", and if the associated parameters are empty,

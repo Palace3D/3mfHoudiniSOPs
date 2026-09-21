@@ -47,7 +47,17 @@ Uses Shader Override:
 Debug:
     #id: debug
     Print extra diagnostic information to the console (`std::clog`)
-    while saving.
+    while saving. Hidden by default, since this is intended for
+    development/troubleshooting rather than everyday use.
+
+    NOTE:
+        To turn this on, right-click the node and choose Parameters
+        and Channels > Edit Parameter Interface. Under Existing
+        Parameters, turn on "Show Invisible Parameters" — Debug
+        will then appear in that list. Click it, then turn off the
+        "Invisible" toggle on its Parameter Description. This makes
+        the toggle visible on this one node instance only —
+        dropping a new Save3mf node still starts with Debug hidden.
 
 Timer:
     #id: timer
@@ -56,7 +66,7 @@ Timer:
 Debug Files:
     #id: debugfiles
     Leave the intermediate files (before they're zipped into the
-    final `.3mf`) in the temp directory for inspection, instead of
+    final `.3mf`) in your temp folder for inspection, instead of
     cleaning them up after the save.
 
 Mesh Name:

@@ -136,11 +136,11 @@ private:
     bool                DEBUGFILES(fpreal t) { return evalInt("debugfiles", 0, t); }
     std::string         filename;
     std::string         mesh;
-    bool                flip;
-    bool                usedShaderOverride;
-    bool                debug;
-    bool                timer;
-    bool                debugfiles;
+    bool                flip = true;
+    bool                usedShaderOverride = false;
+    bool                debug = false;
+    bool                timer = false;
+    bool                debugfiles = false;
     std::string         title;
     std::string         description;
     std::string         designer;

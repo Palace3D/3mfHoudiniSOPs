@@ -401,12 +401,12 @@ namespace HDK_Sample {
         void                ASSETS(std::string& my_assets, fpreal t)   { UT_StringHolder result; evalString(result, "assets", 0, t); my_assets = result.toStdString(); return;}
         bool                DEBUG(fpreal t) { return evalInt("debug", 0, t); }
         std::string         filename;
-        bool                flip;
-        bool                overrideShader;
-        bool                timer;
-        bool                build;
-        bool                geoOnly;
-        bool                debug;
+        bool                flip = true;
+        bool                overrideShader = false;
+        bool                timer = false;
+        bool                build = true;
+        bool                geoOnly = false;
+        bool                debug = false;
         std::string         assets;
 
         // Set true in read so when cookMySop is forced to run it knows it needs to read in the 3mf file

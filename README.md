@@ -99,6 +99,21 @@ needed. No restart required; Houdini's help browser picks these up
 on demand. The filenames must match the SOPs' internal operator
 names (`hdk_save3mf`, `hdk_read3mf`), not their Tab-menu labels.
 
+## Debug Logging
+
+Both SOPs have a `Debug` toggle that prints extra diagnostic
+information to the console. It's hidden from the parameter
+interface by default, since it's a development/troubleshooting
+aid rather than something end users need day-to-day.
+
+To turn it on for a specific node: right-click the node and choose
+**Parameters and Channels > Edit Parameter Interface**. Under
+**Existing Parameters**, turn on **Show Invisible Parameters** —
+`Debug` will then appear in that list. Click it, then turn off the
+**Invisible** toggle on its Parameter Description. This reveals the
+toggle on that one node instance only — every other instance,
+including newly-dropped ones, still starts with it hidden.
+
 ## Dependencies
 
 Vendored in this repository (no separate install needed):

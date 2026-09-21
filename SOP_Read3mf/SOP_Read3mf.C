@@ -197,7 +197,7 @@ SOP_Read3mf::myTemplateList[] = {
     PRM_Template(PRM_TOGGLE,    1, &names[1], &buildit, 0, 0, 0, 0, 1, "Apply 3mf build instructions and render only what is listed in them."),
     PRM_Template(PRM_TOGGLE,    1, &names[2], &geo, 0, 0, 0, 0, 1, "Only read in geometry -- no color or texture."),
     PRM_Template(PRM_TOGGLE,    1, &names[3], &overrideIt, 0, 0, 0, 0, 1, "Use one shader for many textures."),
-    PRM_Template(PRM_TOGGLE,    1, &names[4], &debugit, 0, 0, 0, 0, 1, "Print debug information."),
+    PRM_Template(PRM_Type(PRM_TOGGLE) | PRM_TYPE_INVISIBLE,    1, &names[4], &debugit, 0, 0, 0, 0, 1, "Print debug information."),
     PRM_Template(PRM_TOGGLE,    1, &names[5], &timeit, 0, 0, 0, 0, 1, "Report the time it took to read in the model."),
     PRM_Template(PRM_FILE_E,	1, &names[6], &filen, 0, 0, 0, 0, 1, "Name of the 3mf input file."),
     PRM_Template(PRM_DIRECTORY_E,    1, &names[7], &assetsn, 0, 0, 0, 0, 1, "Folder in which to unpack the 3mf archive."),
@@ -1127,7 +1127,9 @@ SOP_Read3mf::matnetSetup() {
 
     // Find or create the parent and subnet
     script += "parent = hou.node('" + parentPathStr + "')\n";
+    script += "readNode = parent.node('" + std::string(this->getName()) + "')\n";
     script += "subnet = parent.node('" + subnetNameStr + "') or parent.createNode('subnet', '" + subnetNameStr + "')\n";
+    script += "subnet.setPosition(readNode.position() + hou.Vector2(2, 0))\n";
 
     // Find or create the material network
     script += "matnetStr = (subnet.node('3mf_materials') or subnet.createNode('matnet', '3mf_materials')).path()\n";
@@ -1580,7 +1582,17 @@ SOP_Read3mf::~SOP_Read3mf() {
 //
 OP_ERROR
 SOP_Read3mf::cookMySop(OP_Context &context) {
-    //fpreal t = context.getTime();
+    fpreal t = context.getTime();
+
+    // Ensure values are set to the parameters in the GUI even if a geometry isn't being read
+    this->debug = this->DEBUG(t);
+    this->flip = this->FLIP(t);
+    this->overrideShader = this->OVERRIDE(t);
+    this->build = this->BUILD(t);
+    this->geoOnly = this->GEO(t);
+    this->timer = this->TIMER(t);
+    this->FILENAME(this->filename, t);
+    this->ASSETS(this->assets, t);
 
     LOG_DEBUG(this->debug, "Entering cookMySop");
     LOG_DEBUG(false, "Cook: We have " << this->gdp->getNumPoints() << " points.");
@@ -1680,14 +1692,15 @@ SOP_Read3mf::read(void *data, int index, fpreal t, const PRM_Template *tplate) {
     }
 
     // Set up parameters. We at least need the debug for logging.
-    me->debug = me->DEBUG(t);
-    me->flip = me->FLIP(t);
-    me->overrideShader = me->OVERRIDE(t);
-    me->build = me->BUILD(t);
-    me->geoOnly = me->GEO(t);
-    me->timer = me->TIMER(t);
-    me->FILENAME(me->filename, t);
-    me->ASSETS(me->assets, t);
+    // Nope -- these are now set in cookMySop even if read isn't pressed so values match GUI
+    //me->debug = me->DEBUG(t);
+    //me->flip = me->FLIP(t);
+    //me->overrideShader = me->OVERRIDE(t);
+    //me->build = me->BUILD(t);
+    //me->geoOnly = me->GEO(t);
+    //me->timer = me->TIMER(t);
+    //me->FILENAME(me->filename, t);
+    //me->ASSETS(me->assets, t);
     me->start = generateTimestamp();
     me->t = t;
 
