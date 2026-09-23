@@ -586,10 +586,21 @@ SOP_Save3mf::cookMySop(OP_Context &context)
     auto endTime = generateTimestamp();
     auto durationTime = endTime - this->start;
     auto duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(durationTime);
+    long long total_ms = duration_ms.count();
+    long long mins  = (total_ms / 60000);
+    long long secs  = (total_ms % 60000) / 1000;
+    long long msecs = (total_ms % 1000);
 
-    LOG_DEBUG(this->timer || this->debug, "Exiting read -- took " + std::to_string(duration_ms.count()) + " milliseconds");
-    LOG_DEBUG(this->debug, "\nCompleted cooking with no errors. Mesh is " + this->mesh + " and filename is " + this->filename);
-    
+    LOG_DEBUG(this->debug, "\nCompleted cooking with no errors for mesh name " << this->mesh << " and filename " << this->filename);
+    UT_String timeMsg;
+    timeMsg.sprintf("Elapsed Time: %02d:%02d:%03d (m:s:ms)", mins, secs, msecs);
+    LOG_DEBUG(this->timer || this->debug, timeMsg);
+
+    // Add time as information on the node
+    if (this->timer) {
+        addMessage(SOP_MESSAGE, timeMsg.buffer());
+    }
+ 
     return error();
 }
 
