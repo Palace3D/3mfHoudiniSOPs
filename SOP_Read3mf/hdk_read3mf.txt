@@ -22,6 +22,38 @@ WARNING:
     composite-materials resource is cleanly rejected with an error
     rather than silently producing an incorrect result.
 
+== Imported Attributes ==
+
+Read3mf attaches a few attributes to the geometry it produces,
+beyond the geometry itself.
+
+Detail attributes, one value per file, read from the 3mf's
+`<metadata>` elements when present:
+- `in_title`
+- `in_description`
+- `in_designer`
+- `in_application`
+- `in_modificationdate`
+
+These mirror the `out_title`, `out_description`, and `out_designer`
+detail attributes that [Node:sop/hdk_save3mf] uses. `in_application`
+and `in_modificationdate` have no `out_*` counterpart, since
+Save3mf sets those itself and doesn't allow overriding them.
+
+Primitive attributes, tagging every primitive with which 3mf
+`<object>` it came from:
+- `object_id` (integer) — the object's 3mf id. Unique per object,
+  per the 3mf spec, even if two objects share the same name (or
+  have no name at all).
+- `mesh_name` (string) — the object's `name` attribute, if it had
+  one, otherwise empty.
+
+NOTE:
+    These survive merging multiple objects into one piece of
+    geometry (via `<build>` instructions or components), so a file
+    with several named objects still lets you tell, per primitive,
+    which original object it belongs to.
+
 == Materials and Shaders ==
 
 If the 3mf file has texture or multi-property data (and Only

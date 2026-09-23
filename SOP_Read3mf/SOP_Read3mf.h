@@ -438,6 +438,14 @@ namespace HDK_Sample {
         // Name of the model file. This will need to be expanded if there's more than one. XXX
         std::string     theModel;
 
+	// Metadata we capture from the 3mf header which we add as detail attributes to the model.
+	std::string importedTitle;
+	std::string importedDescription;
+	std::string importedDesigner;
+	std::string importedApplication;
+	std::string importedCopyright;
+	std::string importedModificationDate;
+
         // XXXXX Flags to show which kinds of resources the model uses
         bool            hasColor = false;       // Colorgroup found
         bool            hasTexture = false;     // Texture2dgroup found

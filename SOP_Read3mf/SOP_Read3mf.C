@@ -756,6 +756,13 @@ SOP_Read3mf::clearData() {
     this->hasMulti = false;
     this->hasComp = false;
 
+    this->importedTitle.clear();
+    this->importedDescription.clear();
+    this->importedDesigner.clear();
+    this->importedApplication.clear();
+    this->importedCopyright.clear();
+    this->importedModificationDate.clear();
+
     LOG_DEBUG(this->debug, "Exiting clearData");
 
     return ErrorCode::SUCCESS;
@@ -2056,7 +2063,27 @@ SOP_Read3mf::parseModel(std::string the_model) {
                 }
             } else if (tag_name == "metadata") {
                 num_metadata++;
-                LOG_DEBUG(this->debug, "Warning: We do not yet handle model metadata.");
+                const char* meta_name_c = descendant->Attribute("name");
+    		const char* meta_value_c = descendant->GetText();
+    		std::string meta_name = meta_name_c ? meta_name_c : "";
+    		std::string meta_value = meta_value_c ? meta_value_c : "";
+    		LOG_DEBUG(this->debug, "Got metadata " << meta_name << " = " << meta_value);
+
+    		if (meta_name == "Title") {
+        	    this->importedTitle = meta_value;
+    		} else if (meta_name == "Description") {
+        	    this->importedDescription = meta_value;
+    		} else if (meta_name == "Designer") {
+        	    this->importedDesigner = meta_value;
+    		} else if (meta_name == "Application") {
+        	    this->importedApplication = meta_value;
+		} else if (meta_name == "Copyright") {
+		    this->importedCopyright = meta_value;
+    		} else if (meta_name == "ModificationDate") {
+        	    this->importedModificationDate = meta_value;
+    		} else {
+		    LOG_DEBUG(true, "We do not yet capture metadata of type " << meta_name);
+		}
             } else if (tag_name == "build") {
                 if (this->build) {
                     if (this->handleBuild(descendant) != ErrorCode::SUCCESS) {
@@ -2130,6 +2157,14 @@ SOP_Read3mf::parseModel(std::string the_model) {
             }
         }
     }
+
+    // Store imported metadata as detail attributes on the resulting geometry.
+    GA_RWHandleS(this->gdp->addStringTuple(GA_ATTRIB_DETAIL, "in_title", 1)).set(GA_Offset(0), this->	importedTitle);
+    GA_RWHandleS(this->gdp->addStringTuple(GA_ATTRIB_DETAIL, "in_description", 1)).set(GA_Offset(0), this->	importedDescription);
+    GA_RWHandleS(this->gdp->addStringTuple(GA_ATTRIB_DETAIL, "in_designer", 1)).set(GA_Offset(0), this->	importedDesigner);
+    GA_RWHandleS(this->gdp->addStringTuple(GA_ATTRIB_DETAIL, "in_application", 1)).set(GA_Offset(0), this->	importedApplication);
+    GA_RWHandleS(this->gdp->addStringTuple(GA_ATTRIB_DETAIL, "in_copyright", 1)).set(GA_Offset(0), this->	importedCopyright);
+    GA_RWHandleS(this->gdp->addStringTuple(GA_ATTRIB_DETAIL, "in_modificationdate", 1)).set(GA_Offset(0), 	this->importedModificationDate);
 
     printMap(buildDict, "buildDict", this->debug);
     printMap(vertexDict, "vertexDict", this->debug);
@@ -3890,6 +3925,16 @@ SOP_Read3mf::handleObject(XMLElement* element) {
             }
             LOG_DEBUG(false, "For the mesh of object " << id << " we have "
                 << numVertices << " points and " << numTriangles << " triangles.");
+
+	    // Tag every primitive in this object with the 3mf object it came from,
+	    // so the information survives merging multiple objects into one gdp.
+	    GA_RWHandleI objectIdHandle(objGdp->addIntTuple(GA_ATTRIB_PRIMITIVE, "object_id", 1));
+	    GA_RWHandleS meshNameHandle(objGdp->addStringTuple(GA_ATTRIB_PRIMITIVE, "mesh_name", 1));
+	    std::string thisMeshName = (name_cstr != nullptr) ? std::string(name_cstr) : std::string("");
+	    for (GA_Iterator it(objGdp->getPrimitiveRange()); !it.atEnd(); ++it) {
+    		objectIdHandle.set(*it, id);
+    		meshNameHandle.set(*it, thisMeshName);
+	    }
 
         } else if (tag_name == "metadatagroup") {
             std::cerr << "Warning: We do not yet handle metadatagroups, so results might be suspect." << std::endl;
