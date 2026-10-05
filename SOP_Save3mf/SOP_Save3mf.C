@@ -56,6 +56,7 @@
 #include <sstream>
 #include <iomanip>
 #include <algorithm> // for std::transform
+#include <cmath> // for std::pow
 #include <cctype> // for std::tolower
 #include <chrono>
 #include <ctime>
@@ -110,11 +111,14 @@ static PRM_Name names[] = {
     PRM_Name("description", "Description (optional)"), // 3mf header option
     PRM_Name("designer", "Designer (optional)"),   // 3mf header option
     PRM_Name("saveBtn", "Save"),        // Save it
+    // Listed last so the indices above don't shift. The order in the parameter pane is set by myTemplateList.
+    PRM_Name("convertSRGB", "Convert sRGB"), // Houdini's Cd is linear, 3mf colors are sRGB
 };
 
 // SOP parameter defaults
 static PRM_Default  flipit(1);  // Houdini winds in opposite order of 3mf
 static PRM_Default  usedOverride(0); // For now assume we're using a part imported via Read3mf()
+static PRM_Default  convertit(1); // Houdini's Cd is linear and 3mf colors are sRGB, so convert by default
 static PRM_Default  debugit(0);
 static PRM_Default  timeit(0);
 static PRM_Default  debugfilesn(0);
@@ -131,14 +135,15 @@ PRM_Template
 SOP_Save3mf::myTemplateList[] = {
     PRM_Template(PRM_TOGGLE,	1, &names[0], &flipit, 0, 0, 0, 0, 1, "Flip Houdini normals to match 3mf normals."),
     PRM_Template(PRM_TOGGLE,    1, &names[1], &usedOverride, 0, 0, 0, 0, 1, "Uses a single shader for many textures."),
+    PRM_Template(PRM_TOGGLE,    1, &names[11], &convertit, 0, 0, 0, 0, 1, "Encode Houdini's linear Cd colors as sRGB in the 3mf file. 3mf uses sRGB colors, but this toggle exists to accommodate previous versions of the exporter - v3.0 and before - that used linear colors instead."),
     PRM_Template(PRM_Type(PRM_TOGGLE) | PRM_TYPE_INVISIBLE,    1, &names[2], &debugit, 0, 0, 0, 0, 1, "Print debug information."),
     PRM_Template(PRM_TOGGLE,    1, &names[3], &timeit, 0, 0, 0, 0, 1, "Report the time it took to save the model."),
     PRM_Template(PRM_TOGGLE,    1, &names[4], &debugfilesn, 0, 0, 0, 0, 1, "Preserve intermediate model files in your temp folder for inspection."),
     PRM_Template(PRM_STRING,	1, &names[5], &meshn, 0, 0, 0, 0, 1, "Give a name to the mesh in the 3mf file. If this parameter is empty and a detail string attribute out_mesh is set, that attribute value will be used."),
     PRM_Template(PRM_FILE_E,	1, &names[6], &filen, 0, 0, 0, 0, 1, "Name of the 3mf output file. If this parameter is empty and a detail string attribute out_filename is set, then that attribute value will be used."),
     PRM_Template(PRM_STRING,    1, &names[7], &titlen, 0, 0, 0, 0, 1, "Optional title to include in the 3mf header. If this parameter is empty and a detail string attribute out_title is set, that attribute value will be used."),
-    PRM_Template(PRM_STRING,    1, &names[8], &descriptionn, 0, 0, 0, 0, 1, "Optional description to include in the 3mf header."),
-    PRM_Template(PRM_STRING,    1, &names[9], &designern, 0, 0, 0, 0, 1, "Optional designer's name to include in the 3mf header."),
+    PRM_Template(PRM_STRING,    1, &names[8], &descriptionn, 0, 0, 0, 0, 1, "Optional description to include in the 3mf header. If this parameter is empty and a detail string attribute out_description is set, that attribute value will be used."),
+    PRM_Template(PRM_STRING,    1, &names[9], &designern, 0, 0, 0, 0, 1, "Optional designer's name to include in the 3mf header. If this parameter is empty and a detail string attribute out_designer is set, that attribute value will be used."),
     PRM_Template(PRM_CALLBACK,  1, &names[10], 0, 0, 0, &SOP_Save3mf::save, 0, 1, "Save the 3mf model."),
     PRM_Template(),
 };
@@ -196,13 +201,36 @@ std::string generatePseudoUUID() {
 
 
 //
-// Convert color in floats to a string.
+// Houdini's Cd is linear, but 3mf colors are sRGB. Encode one channel from linear to sRGB
+// (IEC 61966-2-1 transfer function). The input is clamped to [0, 1] first, since Cd can hold
+// out-of-range values; NaN comes out as 0.
+//
+static inline float
+linearToSRGB(float c) {
+    if (!(c > 0.0f)) {  // Negative or NaN
+        return 0.0f;
+    }
+    if (c > 1.0f) {
+        c = 1.0f;
+    }
+    const double v = static_cast<double>(c);
+    return static_cast<float>(v <= 0.0031308 ? 12.92 * v : 1.055 * std::pow(v, 1.0 / 2.4) - 0.055);
+}
+
+
+//
+// Convert color in floats to a string. If encodeSRGB is true the incoming values are linear
+// and get encoded to sRGB first; if false they are written as they are.
 //
 std::string
-convertColor(std::array<float, 3> CdFloat) {
+convertColor(std::array<float, 3> CdFloat, bool encodeSRGB) {
     std::array<int, 3> CdInt;
     for (size_t i = 0; i < CdFloat.size(); ++i) {
-        float tmpF = CdFloat[i] * 255.0f + 0.5f;
+        float c = CdFloat[i];
+        if (encodeSRGB) {
+            c = linearToSRGB(c);
+        }
+        float tmpF = c * 255.0f + 0.5f;
         int tmpI = static_cast<int>(tmpF);
         CdInt[i] = std::min(255, std::max(0, tmpI));
     }
@@ -471,6 +499,7 @@ SOP_Save3mf::cookMySop(OP_Context &context)
     this->debugfiles = this->DEBUGFILES(t);
     this->flip = this->FLIP(t);
     this->usedShaderOverride = this->OVERRIDE(t);
+    this->convertSRGB = this->CONVERTSRGB(t);
     this->timer = this->TIMER(t);
     this->MESH(this->mesh, t);
     this->FILENAME(this->filename, t);
@@ -480,50 +509,37 @@ SOP_Save3mf::cookMySop(OP_Context &context)
 
     LOG_DEBUG(this->debug, "Entering cookMySop");
 
-    // If the incoming geometry carries detail attributes named "out_meshname"
-    // or "out_filename" or "out_title", and if the associated parameters are empty,
-    // then use the attributes for the parameter values. This lets
-    // upstream nodes (e.g. a wrangle building a name from other parameters)
-    // drive these fields dynamically without needing an expression that would
-    // re-cook this node's own (already-locked) input chain.
-    GA_ROHandleS filename_attr(gdp, GA_ATTRIB_DETAIL, "out_filename");
-    if (filename_attr.isValid()) {
-        if (!this->filename.empty()) {
-            LOG_DEBUG(this->debug, "Filename attr is valid but filename parameter is set.");
-            addWarning(SOP_MESSAGE, "File Name parameter is set, but an "
-                "'out_filename' detail attribute is also present on the input "
-                "geometry; the parameter value will be used instead of the attribute.");
-        } else {
-            this->filename = filename_attr.get(GA_Offset(0)).toStdString();
-            LOG_DEBUG(this->debug, "Using filename from detail attribute: " << this->filename);
+    // If the incoming geometry carries string detail attributes named "out_filename", "out_mesh",
+    // "out_title", "out_description" or "out_designer", and the matching parameters are empty, use the
+    // attributes for the parameter values. This lets upstream nodes (e.g. a wrangle building a name from
+    // other parameters) drive these fields dynamically without needing an expression that would re-cook
+    // this node's own (already-locked) input chain. A parameter that isn't empty always wins, with a
+    // warning, so it's clear the attribute was ignored.
+    auto useDetailAttr = [&](const char *attrName, const char *parmLabel, std::string &value) -> bool {
+        GA_ROHandleS attr(gdp, GA_ATTRIB_DETAIL, attrName);
+        if (!attr.isValid()) {
+            return false;
         }
+        if (!value.empty()) {
+            LOG_DEBUG(this->debug, attrName << " attr is valid but the " << parmLabel << " parameter is set.");
+            std::string message = std::string(parmLabel) + " parameter is set, but an '" + attrName
+                + "' detail attribute is also present on the input geometry; the parameter value will be "
+                "used instead of the attribute.";
+            addWarning(SOP_MESSAGE, message.c_str());
+        } else {
+            value = attr.get(GA_Offset(0)).toStdString();
+            LOG_DEBUG(this->debug, "Using " << parmLabel << " from detail attribute " << attrName << ": " << value);
+        }
+        return true;
+    };
+    useDetailAttr("out_filename", "File Name", this->filename);
+    // "out_mesh" is the documented name. "out_meshname" is what earlier versions read, so it still works.
+    if (!useDetailAttr("out_mesh", "Mesh Name", this->mesh)) {
+        useDetailAttr("out_meshname", "Mesh Name", this->mesh);
     }
-
-    GA_ROHandleS mesh_attr(gdp, GA_ATTRIB_DETAIL, "out_meshname");
-    if (mesh_attr.isValid()) {
-        if (!this->mesh.empty()) {
-            LOG_DEBUG(this->debug, "Mesh attr is valid but mesh parameter is set.");
-            addWarning(SOP_MESSAGE, "Mesh Name parameter is set, but an "
-                "'out_meshname' detail attribute is also present on the input "
-                "geometry; the parameter value will be used instead of the attribute.");
-        } else {
-            this->mesh = mesh_attr.get(GA_Offset(0)).toStdString();
-            LOG_DEBUG(this->debug, "Using mesh name from detail attribute: " << this->mesh);
-        }
-    }
-
-    GA_ROHandleS title_attr(gdp, GA_ATTRIB_DETAIL, "out_title");
-    if (title_attr.isValid()) {
-        if (!this->title.empty()) {
-            LOG_DEBUG(this->debug, "Title attr is valid but title parameter is set.");
-            addWarning(SOP_MESSAGE, "Title parameter is set, but an "
-                "'out_title' detail attribute is also present on the input "
-                "geometry; the parameter value will be used instead of the attribute.");
-        } else {
-            this->title = title_attr.get(GA_Offset(0)).toStdString();
-            LOG_DEBUG(this->debug, "Using title from detail attribute: " << this->title);
-        }
-    }    
+    useDetailAttr("out_title", "Title", this->title);
+    useDetailAttr("out_description", "Description", this->description);
+    useDetailAttr("out_designer", "Designer", this->designer);
 
     this->start = generateTimestamp();
     this->timeString = generateTimestampString();
@@ -1368,7 +1384,7 @@ SOP_Save3mf::saveColors(const GU_Detail* gdp) {
             // If prim is in primColorDict then we use the base color texture found there
             if (auto it = this->primColorDict.find(pIndex); it != this->primColorDict.end()) {
                 const std::array<float, 3> CdFloat = it->second.color;
-                std::string converted = convertColor(CdFloat);
+                std::string converted = convertColor(CdFloat, this->convertSRGB);
                 {
                     std::stringstream st;
                     st << "  <m:color color=\"#";
@@ -1449,7 +1465,7 @@ SOP_Save3mf::saveColors(const GU_Detail* gdp) {
                 GA_Offset vOffset = vertices[localVert];
                 color = Cd_h.get(vOffset);
                 std::array<float, 3> standardColor = {color.x(), color.y(), color.z()};
-                std::string converted = convertColor(standardColor);
+                std::string converted = convertColor(standardColor, this->convertSRGB);
                 bool isNew;
                 int colorIndex = getOrAddColor(this->colorsByGroup[this->colorgroupId], converted, pIndex, localVert, isNew);
                 
@@ -1479,7 +1495,7 @@ SOP_Save3mf::saveColors(const GU_Detail* gdp) {
                 color = Cd_h.get(pointOffset); // look up color by point offset
                 
                 std::array<float, 3> standardColor = {color.x(), color.y(), color.z()};
-                std::string converted = convertColor(standardColor);
+                std::string converted = convertColor(standardColor, this->convertSRGB);
                 bool isNew;
                 int colorIndex = getOrAddColor(this->colorsByGroup[this->colorgroupId], converted, pIndex, localVert, isNew);
                 LOG_DEBUG(this->debug, "prim " << pIndex << " local vert " << localVert << " color " << converted << " index " << colorIndex << " isNew " << isNew);
@@ -1490,23 +1506,6 @@ SOP_Save3mf::saveColors(const GU_Detail* gdp) {
                 }
             }
         }
-/*
-        for (GA_Iterator it(gdp->getPointRange()); !it.atEnd(); ++it) {
-            GA_Offset offset = *it;
-            color = Cd_h.get(offset);
-            std::array<float, 3> standardColor;
-            //LOG_DEBUG(this->debug, "Point Offset " + std::to_string(offset)
-                //+ " Color R:" + std::to_string(color.x())
-                //+ " G:" + std::to_string(color.y())
-                //+ " B:" + std::to_string(color.z()));
-            standardColor = {color.x(), color.y(), color.z()};
-            std::string converted = convertColor(standardColor);
-
-            this->modelOutput.append("  <m:color color=\"#");
-            this->modelOutput.append(converted);
-            this->modelOutput.append("\"/>\n");
-        }
-*/
         break;
     }
     case GA_ATTRIB_PRIMITIVE:
@@ -1522,7 +1521,7 @@ SOP_Save3mf::saveColors(const GU_Detail* gdp) {
                 //+ " G:" + std::to_string(color.y())
                 //+ " B:" + std::to_string(color.z()));
             standardColor = {color.x(), color.y(), color.z()};
-            std::string converted = convertColor(standardColor);
+            std::string converted = convertColor(standardColor, this->convertSRGB);
             GA_Index pIndex = gdp->primitiveIndex(offset);
             bool isNew;
             int colorIndex = getOrAddColor(this->colorsByGroup[this->colorgroupId], converted, pIndex, 0, isNew);
@@ -1546,7 +1545,7 @@ SOP_Save3mf::saveColors(const GU_Detail* gdp) {
                 //+ " G:" + std::to_string(color.y())
                 //+ " B:" + std::to_string(color.z()));
         standardColor = {color.x(), color.y(), color.z()};
-        std::string converted = convertColor(standardColor);
+        std::string converted = convertColor(standardColor, this->convertSRGB);
 
         this->modelOutput.append("  <m:color color=\"#");
         this->modelOutput.append(converted);
@@ -1625,7 +1624,9 @@ SOP_Save3mf::writeHeader(bool material_ext, bool boolean_ext, bool production_ex
         this->modelOutput.append("</metadata>\n");
     }
     this->modelOutput.append("<metadata name=\"Application\">");
-    this->modelOutput.append("Houdini 3MF Export 3.0</metadata>\n"); // ToDo -- figure out what the version number would actually be
+    this->modelOutput.append("Houdini 3MF Export ");
+    this->modelOutput.append(EXPORTER_VERSION);
+    this->modelOutput.append("</metadata>\n");
     if (!this->description.empty()) {
         this->modelOutput.append("<metadata name=\"Description\">");
         this->modelOutput.append(this->description);

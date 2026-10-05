@@ -120,12 +120,17 @@ private:
     static constexpr int    INITIAL_ID = 4;
     // A default name for the mesh for inside the 3mf model.model file header
     static constexpr const char*    MESH_NAME_DEFAULT = "houdini_mesh";
+    // Version of this exporter, written into the 3mf file's Application metadata.
+    // 3.0: original
+    // 3.1: colors are written as sRGB if the "Convert sRGB" toggle is on (and it is by default)
+    static constexpr const char*    EXPORTER_VERSION = "3.1";
     // Color for default object-level property, unless discovered otherwise
     static constexpr std::array<int, 3>    DEFAULT_COLOR = {0xff, 0xff, 0xff};
 
     // If parameters change then the SOP recooks, so these don't need to be in callback data
     bool                FLIP(fpreal t) { return evalInt("flip", 0, t); }
     bool                OVERRIDE(fpreal t) { return evalInt("usedShaderOverride", 0, t); }
+    bool                CONVERTSRGB(fpreal t) { return evalInt("convertSRGB", 0, t); }
     void                MESH(std::string& my_mesh, fpreal t)      { UT_StringHolder result; evalString(result, "mesh", 0, t); my_mesh = result.toStdString(); return;}
     void                FILENAME(std::string& my_file, fpreal t)    { UT_StringHolder result; evalString(result, "filename", 0, t); my_file = result.toStdString(); return;}
     void                TITLE(std::string& my_title, fpreal t)   { UT_StringHolder result; evalString(result, "title", 0, t); my_title = result.toStdString(); return;}
@@ -138,6 +143,7 @@ private:
     std::string         mesh;
     bool                flip = true;
     bool                usedShaderOverride = false;
+    bool                convertSRGB = true;
     bool                debug = false;
     bool                timer = false;
     bool                debugfiles = false;

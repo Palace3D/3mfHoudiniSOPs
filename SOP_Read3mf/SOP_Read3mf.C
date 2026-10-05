@@ -47,6 +47,10 @@
 #include <UT/UT_DSOVersion.h>
 #include <cstddef>
 #include <string>
+#include <cmath> // for std::pow
+#include <cstdio> // for std::sscanf
+#include <cctype> // for std::tolower
+#include <algorithm> // for std::equal
 #include <filesystem>
 //#include <format> // This version of C++ is too old to use this, alas.
 #include <iostream>
@@ -175,6 +179,8 @@ static PRM_Name names[] = {
     PRM_Name("filename", "File Name"),  // 3mf file name
     PRM_Name("assets", "Asset Folder"),// Folder in which to unpack the 3mf file
     PRM_Name("readBtn", "Read"),        // Read it
+    // Listed last so the indices above don't shift. The order in the parameter pane is set by myTemplateList.
+    PRM_Name("convertSRGB", "Convert sRGB"), // 3mf colors are sRGB, Houdini's Cd is linear
 };
 
 // SOP parameter defaults
@@ -182,6 +188,7 @@ static PRM_Default  flipit(1);  // Houdini winds in opposite order of 3mf
 static PRM_Default  buildit(1); // By default, we should apply these
 static PRM_Default  geo(0);     // By default, we'll read in everything
 static PRM_Default  overrideIt(0); // Use a single shader for many textures
+static PRM_Default  convertit(1); // 3mf colors are sRGB and Houdini's Cd is linear, so convert by default
 static PRM_Default  debugit(0); // Turn on during development or major debugging
 static PRM_Default  timeit(0);  // Record how long it takes to read in the model
 static PRM_Default  filen(0, "my-model.3mf");
@@ -197,6 +204,7 @@ SOP_Read3mf::myTemplateList[] = {
     PRM_Template(PRM_TOGGLE,    1, &names[1], &buildit, 0, 0, 0, 0, 1, "Apply 3mf build instructions and render only what is listed in them."),
     PRM_Template(PRM_TOGGLE,    1, &names[2], &geo, 0, 0, 0, 0, 1, "Only read in geometry -- no color or texture."),
     PRM_Template(PRM_TOGGLE,    1, &names[3], &overrideIt, 0, 0, 0, 0, 1, "Use one shader for many textures."),
+    PRM_Template(PRM_TOGGLE,    1, &names[9], &convertit, 0, 0, 0, 0, 1, "Convert the sRGB colors in the 3mf file to Houdini's linear Cd. Takes effect the next time Read is pressed."),
     PRM_Template(PRM_Type(PRM_TOGGLE) | PRM_TYPE_INVISIBLE,    1, &names[4], &debugit, 0, 0, 0, 0, 1, "Print debug information."),
     PRM_Template(PRM_TOGGLE,    1, &names[5], &timeit, 0, 0, 0, 0, 1, "Report the time it took to read in the model."),
     PRM_Template(PRM_FILE_E,	1, &names[6], &filen, 0, 0, 0, 0, 1, "Name of the 3mf input file."),
@@ -455,6 +463,250 @@ parseTransformString(const std::string& transformString, UT_Matrix4& matrix) {
 
 
 //
+// 3mf colors are sRGB, but Houdini's Cd is linear. Decode one channel from sRGB to linear
+// (IEC 61966-2-1 transfer function).
+//
+static inline float
+srgbToLinear(float c) {
+    const double v = static_cast<double>(c);
+    return static_cast<float>(v <= 0.04045 ? v / 12.92 : std::pow((v + 0.055) / 1.055, 2.4));
+}
+
+
+//
+// Decode the RGB of a color from sRGB to linear. Alpha is not color data, so it is left alone.
+//
+static inline void
+decodeSRGB(PixelColor &color) {
+    color.rgb[0] = srgbToLinear(color.rgb[0]);
+    color.rgb[1] = srgbToLinear(color.rgb[1]);
+    color.rgb[2] = srgbToLinear(color.rgb[2]);
+}
+
+
+//
+// True if any color in the colorgroups has an RGB channel that decoding from sRGB changed. The decode leaves
+// a channel at exactly 0 or exactly 1 as it was and moves every other value, so this is the same as asking
+// whether any channel is strictly between 0 and 1 -- which can be checked on the decoded colors as well as
+// on the originals. Only colorgroups are looked at: texture pixels are sRGB image data in any file, so
+// decoding them is right even when the file came from an old Save3mf.
+//
+static bool
+anyColorChangedBySRGB(const std::unordered_map<int, std::vector<PixelColor>> &colorgroups) {
+    for (const auto &group : colorgroups) {
+        for (const PixelColor &color : group.second) {
+            for (int i = 0; i < 3; ++i) {
+                if (color.rgb[i] > 0.0f && color.rgb[i] < 1.0f) {
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
+}
+
+
+//
+// Save3mf writes its Application metadata as "Houdini 3MF Export <major>.<minor>". Versions before 3.1 wrote
+// the Cd values into the file as they were, without encoding them as sRGB.
+//
+static constexpr const char*    SAVE3MF_APPLICATION_PREFIX = "Houdini 3MF Export ";
+static constexpr int            SAVE3MF_SRGB_MAJOR = 3;
+static constexpr int            SAVE3MF_SRGB_MINOR = 1;
+
+
+//
+// True if the Application metadata says the file was written by a Save3mf older than the first version that
+// encoded its colors as sRGB. A file from any other application, or one whose version we can't read, is not
+// flagged -- 3mf colors are supposed to be sRGB, so for those it is right to decode them.
+//
+static bool
+isFromPreSRGBSave3mf(const std::string &application) {
+    const std::string prefix(SAVE3MF_APPLICATION_PREFIX);
+    if (application.compare(0, prefix.size(), prefix) != 0) {
+        return false;
+    }
+    int major = 0;
+    int minor = 0; // Stays 0 if the version is just "3"
+    if (std::sscanf(application.c_str() + prefix.size(), "%d.%d", &major, &minor) < 1) {
+        return false;
+    }
+    return major < SAVE3MF_SRGB_MAJOR || (major == SAVE3MF_SRGB_MAJOR && minor < SAVE3MF_SRGB_MINOR);
+}
+
+
+//
+// The text of the warning for colors decoded from a file written by an old Save3mf.
+//
+static std::string
+oldSaveWarningText(const std::string &application) {
+    return "This file was written by '" + application + "', before Save3mf converted colors to sRGB, "
+        "and it has colors that would be affected. "
+        "With Convert sRGB on, its colors will import darker than the originals. "
+        "Turn Convert sRGB off and press Read again to reproduce them.";
+}
+
+
+//
+// The 3mf extensions Read3mf currently understands, by namespace. A file lists the extensions it can't be read
+// correctly without in the "requiredextensions" attribute of its <model> element, as namespace prefixes.
+//   Materials: colors, textures, base materials and multiproperties (composite materials aren't supported, and
+//              say so on their own).
+//   Production: its UUIDs are harmless to ignore, and a p:path to another model file stops the import with
+//              its own error.
+//
+static const char* const SUPPORTED_EXTENSION_NAMESPACES[] = {
+    "http://schemas.microsoft.com/3dmanufacturing/material/2015/02",
+    "http://schemas.microsoft.com/3dmanufacturing/production/2015/06",
+};
+
+
+//
+// A readable name for a 3mf extension namespace, for the unsupported-extension warning. Matched loosely on a
+// word in the namespace, so newer versions of an extension still get a name. Empty if we don't recognize it.
+//
+static std::string
+extensionDisplayName(const std::string &ns) {
+    static const std::pair<const char*, const char*> names[] = {
+        {"/slice/", "Slice"},
+        {"/beamlattice/", "Beam Lattice"},
+        {"/securecontent/", "Secure Content"},
+        {"/volumetric/", "Volumetric"},
+        {"/implicit/", "Implicit"},
+        {"/displacement/", "Displacement"},
+        {"/booleanoperations/", "Boolean Operations"},
+        {"/material/", "Materials"},
+        {"/production/", "Production"},
+    };
+    for (const auto &[word, name] : names) {
+        if (ns.find(word) != std::string::npos) {
+            return name;
+        }
+    }
+    return "";
+}
+
+
+//
+// Look at the <model> element's requiredextensions and return a description of each one Read3mf doesn't
+// support, e.g. "Slice (http://schemas.microsoft.com/3dmanufacturing/slice/2015/07)", joined with "; ".
+// Empty if they're all supported, or there are none. Each prefix is looked up through the element's own
+// xmlns:<prefix> declarations, since the spec says it must be declared there.
+//
+static std::string
+unsupportedRequiredExtensions(const tinyxml2::XMLElement *model) {
+    const char *required = model->Attribute("requiredextensions");
+    if (!required) {
+        return "";
+    }
+    std::string result;
+    std::istringstream prefixes(required);
+    std::string prefix;
+    while (prefixes >> prefix) {
+        const char *ns_c = model->Attribute(("xmlns:" + prefix).c_str());
+        std::string description;
+        if (!ns_c) {
+            description = "'" + prefix + "' (a prefix with no namespace declared for it)";
+        } else {
+            std::string ns(ns_c);
+            bool supported = false;
+            for (const char *known : SUPPORTED_EXTENSION_NAMESPACES) {
+                if (ns == known) {
+                    supported = true;
+                    break;
+                }
+            }
+            if (supported) {
+                continue;
+            }
+            std::string name = extensionDisplayName(ns);
+            description = name.empty() ? ns : name + " (" + ns + ")";
+        }
+        if (!result.empty()) {
+            result += "; ";
+        }
+        result += description;
+    }
+    return result;
+}
+
+
+//
+// The text of the warning for a file that requires extensions we don't support.
+//
+static std::string
+unsupportedExtensionsWarningText(const std::string &extensions) {
+    return "This file requires 3mf extensions that Read3mf does not currently support: " + extensions
+        + ". Anything in the file that depends on them is ignored, so the import may be incomplete or wrong.";
+}
+
+
+//
+// The Production Extension lets a component or a build item name the model file its object lives in, with a
+// "path" attribute in the extension's namespace. That's "p:path" in nearly every file, but the prefix is the
+// file's choice, so accept any prefix. Returns the attribute's value, or nullptr if the element has none.
+//
+static const char*
+productionPathAttribute(const tinyxml2::XMLElement *element) {
+    for (const tinyxml2::XMLAttribute *attr = element->FirstAttribute(); attr; attr = attr->Next()) {
+        const char *colon = strrchr(attr->Name(), ':');
+        if (colon && strcmp(colon + 1, "path") == 0) {
+            return attr->Value();
+        }
+    }
+    return nullptr;
+}
+
+
+//
+// True if two part names in a 3mf package name the same part. Part names are not case sensitive, and may or
+// may not start with a slash.
+//
+static bool
+samePartName(const std::string &a, const std::string &b) {
+    auto withoutSlash = [](const std::string &s) { return (!s.empty() && s[0] == '/') ? s.substr(1) : s; };
+    const std::string x = withoutSlash(a);
+    const std::string y = withoutSlash(b);
+    return x.size() == y.size() && std::equal(x.begin(), x.end(), y.begin(),
+        [](unsigned char c1, unsigned char c2) { return std::tolower(c1) == std::tolower(c2); });
+}
+
+
+//
+// True if a component or build item says its object is in a model file other than the root model file,
+// which is the only one we read. The file it names is returned in otherFile. A path that names the root
+// model file itself, or an empty one, is not a reference to somewhere else.
+//
+static bool
+refersToOtherModelFile(const tinyxml2::XMLElement *element, const std::string &rootModelPart, std::string &otherFile) {
+    const char *path = productionPathAttribute(element);
+    if (!path || !*path || samePartName(path, rootModelPart)) {
+        return false;
+    }
+    otherFile = path;
+    return true;
+}
+
+
+//
+// The error text for a multiproperties layer whose resource is not a color group, base materials group, or
+// texture group, which are the only kinds we handle. In a valid file the usual culprit is a composite materials
+// group, so say so when that's what the layer uses (compositeIds holds the ids of the composite groups we saw).
+//
+static std::string
+unsupportedLayerMessage(const std::unordered_set<int> &compositeIds, int multiId, int layerId) {
+    const std::string group = "Multiproperties group " + std::to_string(multiId);
+    if (compositeIds.count(layerId)) {
+        return group + " has a layer that uses composite materials group " + std::to_string(layerId)
+            + ". Composite materials are not currently supported, so this model cannot be imported.";
+    }
+    return group + " has a layer (resource " + std::to_string(layerId) + ") that is not a color group, a base "
+        "materials group, or a texture group. Those are the only kinds of layer we currently handle, so this "
+        "model cannot be imported.";
+}
+
+
+//
 // Convert 3mf color format to Houdini's. Returns default color on failure. If alpha is not specified in the string
 // (only 6 hex digits instead of 8) we assume it is 1.0f.
 //
@@ -494,6 +746,10 @@ SOP_Read3mf::convertHexStringToPixelColor(const std::string& hex_string) {
         result.rgb[2] = ( rgba_int        & 0xFF) / 255.0f;
         result.a      = 1.0f;
     }
+    // 3mf colors are sRGB and Houdini's Cd is linear. Alpha is left as it is.
+    if (this->convertSRGB) {
+        decodeSRGB(result);
+    }
     LOG_DEBUG(this->debug, "Exiting convertHexStringToPixelColor");
     return result;
 }
@@ -515,8 +771,10 @@ colormap(std::string texturePath, const UT_Vector2& uv, PixelColor& color, bool 
         return SOP_Read3mf::ErrorCode::FILE_FAILURE;
     }
     // clamp values -- should I bother?
+    // 3mf (like Houdini and VEX) puts v = 0 at the bottom of the image, but stb_image stores
+    // row 0 at the top, so flip v to get the row.
     int x = static_cast<int>(uv[0] * width);
-    int y = static_cast<int>(uv[1] * height);
+    int y = static_cast<int>((1.0f - uv[1]) * height);
     x = std::max(0, std::min(x, width - 1));
     y = std::max(0, std::min(y, height - 1));
 
@@ -755,6 +1013,10 @@ SOP_Read3mf::clearData() {
     this->hasBase = false;
     this->hasMulti = false;
     this->hasComp = false;
+    this->compositeIds.clear();
+    this->oldSaveColorsDecoded = false;
+    this->unsupportedExtensions.clear();
+    this->readWarnings.clear();
 
     this->importedTitle.clear();
     this->importedDescription.clear();
@@ -1584,6 +1846,59 @@ SOP_Read3mf::~SOP_Read3mf() {
 
 
 //
+// Put a warning on the node if its geometry was imported with Convert sRGB on from a file written by an old
+// Save3mf. Houdini clears a node's warnings at the start of every cook, so cooks that only hand back the
+// geometry we already have call this again to put the warning back.
+//
+void
+SOP_Read3mf::warnOldSaveColorsDecoded() {
+    if (this->oldSaveColorsDecoded) {
+        this->addWarning(SOP_MESSAGE, oldSaveWarningText(this->importedApplication).c_str());
+    }
+}
+
+
+//
+// Put a warning on the node if the file requires 3mf extensions we don't support. Like the one above, it's
+// called again on cooks that only hand back the geometry we already have, since Houdini clears warnings then.
+//
+void
+SOP_Read3mf::warnUnsupportedExtensions() {
+    if (!this->unsupportedExtensions.empty()) {
+        this->addWarning(SOP_MESSAGE, unsupportedExtensionsWarningText(this->unsupportedExtensions).c_str());
+    }
+}
+
+
+//
+// Record a warning found while reading the file in the read() callback, and print it to the console. Warnings
+// added to the node from the callback don't last, since Houdini clears them when the node next cooks, so
+// warnReadWarnings() puts them on the node during each cook. A repeated message is only kept once.
+//
+void
+SOP_Read3mf::addReadWarning(const std::string &message) {
+    for (const std::string &existing : this->readWarnings) {
+        if (existing == message) {
+            return;
+        }
+    }
+    this->readWarnings.push_back(message);
+    std::cerr << "Warning: " << message << std::endl;
+}
+
+
+//
+// Put the warnings recorded by addReadWarning() on the node.
+//
+void
+SOP_Read3mf::warnReadWarnings() {
+    for (const std::string &message : this->readWarnings) {
+        this->addWarning(SOP_MESSAGE, message.c_str());
+    }
+}
+
+
+//
 // Cooking SOP. The first time this is put down, nothing interesting happens. But a read callback will cause
 // this sop to cook again, with a flag set to make it actually read in the 3mf model and create the geometry.
 //
@@ -1595,6 +1910,7 @@ SOP_Read3mf::cookMySop(OP_Context &context) {
     this->debug = this->DEBUG(t);
     this->flip = this->FLIP(t);
     this->overrideShader = this->OVERRIDE(t);
+    this->convertSRGB = this->CONVERTSRGB(t);
     this->build = this->BUILD(t);
     this->geoOnly = this->GEO(t);
     this->timer = this->TIMER(t);
@@ -1611,8 +1927,11 @@ SOP_Read3mf::cookMySop(OP_Context &context) {
 
     if (!shouldLoad) {
         // If we shouldn't load a geometry, the function exits, returning the cached geometry.
+        this->warnOldSaveColorsDecoded();
+        this->warnUnsupportedExtensions();
+        this->warnReadWarnings();
         LOG_DEBUG(this->debug, "Exiting cookMySop with no geometry to cook");
-        return OP_ERROR::UT_ERROR_NONE;
+        return error();
     }
 
     LOG_DEBUG(false, "Should load is " << shouldLoad);
@@ -1647,6 +1966,7 @@ SOP_Read3mf::cookMySop(OP_Context &context) {
         return error();
     }
 
+    this->rootModelPart = model_file; // The name inside the package, for spotting references to other model files
     std::filesystem::path the_model_path = std::filesystem::path(this->extractFolder) / model_file;
     std::string the_model = the_model_path.string();
     LOG_DEBUG(this->debug, "We have the model file including path as " << the_model);
@@ -1656,6 +1976,12 @@ SOP_Read3mf::cookMySop(OP_Context &context) {
         this->addError(SOP_MESSAGE, "Unable to parse the 3mf model file.");
         return error();
     }
+
+    // Warn if the colors we decoded came from an old Save3mf, or the file needs extensions we don't support
+    // (parseModel works both out)
+    this->warnOldSaveColorsDecoded();
+    this->warnUnsupportedExtensions();
+    this->warnReadWarnings(); // Found earlier, in the read() callback
 
     auto endTime = generateTimestamp();
     auto durationTime = endTime - this->start;
@@ -1708,6 +2034,10 @@ SOP_Read3mf::read(void *data, int index, fpreal t, const PRM_Template *tplate) {
     //me->timer = me->TIMER(t);
     //me->FILENAME(me->filename, t);
     //me->ASSETS(me->assets, t);
+    // One exception to the above: the colorgroup and basematerials colors are decoded while the resources
+    // are parsed in this callback, not in cookMySop, so read the sRGB toggle fresh here rather than
+    // relying on whatever the last cook saw.
+    me->convertSRGB = me->CONVERTSRGB(t);
     me->start = generateTimestamp();
     me->t = t;
 
@@ -1723,7 +2053,19 @@ SOP_Read3mf::read(void *data, int index, fpreal t, const PRM_Template *tplate) {
     // ===> OR USE THE UNIQUE NODE ID instead.
     //OP_Node *oldSubnet = parent->findNode(me->subnetPath.buffer());
     LOG_DEBUG(me->debug, "We have subnetPath of " << me->subnetPath);
-    OP_Node *oldSubnet = me->findNode(me->subnetPath.buffer());
+    // Find the subnet by the name matnetSetup() gives it (our node name + "_subnet", next to us), rather
+    // than relying on subnetPath, which isn't saved with the hip file and is empty after a reload.
+    UT_String ourFullPath, parentPath, ourName;
+    me->getFullPath(ourFullPath);
+    ourFullPath.splitPath(parentPath, ourName);
+    UT_String expectedSubnetPath(UT_String::ALWAYS_DEEP, parentPath.buffer());
+    if (strcmp(parentPath.buffer(), "/") != 0) {
+        expectedSubnetPath += "/";
+    }
+    expectedSubnetPath += ourName.buffer();
+    expectedSubnetPath += "_subnet";
+    LOG_DEBUG(me->debug, "Looking for an old subnet at " << expectedSubnetPath);
+    OP_Node *oldSubnet = me->findNode(expectedSubnetPath.buffer());
 
     if (oldSubnet) {
         // Now destroy it. This also recursively destroys all children (materials, etc.)
@@ -2013,6 +2355,13 @@ SOP_Read3mf::parseModel(std::string the_model) {
         std::string root_tag = root->Name(); 
         LOG_DEBUG(false, "Root Element Tag: " << root_tag);
 
+        // A file lists the extensions it can't be read correctly without. We read it anyway, but say which
+        // of them we don't support, since whatever depends on them will be missing or wrong.
+        this->unsupportedExtensions = unsupportedRequiredExtensions(root);
+        if (!this->unsupportedExtensions.empty()) {
+            std::cerr << "Warning: " << unsupportedExtensionsWarningText(this->unsupportedExtensions) << std::endl;
+        }
+
         // Unit Conversion and Scaling
         const char* unit_value_c = root->Attribute("unit");
         
@@ -2113,6 +2462,18 @@ SOP_Read3mf::parseModel(std::string the_model) {
         return ErrorCode::BAD_3MF;
     }
 
+    // A file from a Save3mf older than 3.1 holds Cd values that were never encoded as sRGB, so decoding its
+    // colors makes them darker than the originals. Only flag it when that really happened: we're reading more
+    // than geometry, Convert sRGB is on, the file came from an old Save3mf, and the decode changed at least one
+    // of its colors. (A file made only of channels at exactly 0 or 1 -- black, white, pure red and so on -- is
+    // the same either way, so it isn't flagged.)
+    this->oldSaveColorsDecoded = !this->geoOnly && this->hasColor && this->convertSRGB
+        && isFromPreSRGBSave3mf(this->importedApplication)
+        && anyColorChangedBySRGB(this->colorDict);
+    if (this->oldSaveColorsDecoded) {
+        std::cerr << "Warning: " << oldSaveWarningText(this->importedApplication) << std::endl;
+    }
+
     // Process build list and merge into GDP
     UT_Matrix4 scale_matrix(this->scale_factor);
     this->gdp->clearAndDestroy();
@@ -2209,9 +2570,28 @@ SOP_Read3mf::handleResourcesForSubnet(XMLElement* element) {
             } else if (tag_name == "basematerials") {
                 err = handleBasematerials(descendant);
             } else if (tag_name == "m:multiproperties") {
-		std::cerr << "Warning: We do not yet handle multi-properties correctly, so results might be suspect." << std::endl;
+                // blendmethods gives each layer after the first a blend of "mix" (the default) or "multiply". We
+                // currently blend every layer as mix, so say so if a group asks for multiply.
+                const char* blendC = descendant->Attribute("blendmethods");
+                if (blendC) {
+                    std::istringstream blends(blendC);
+                    std::string blend;
+                    while (blends >> blend) {
+                        if (blend == "multiply") {
+                            const char* groupC = descendant->Attribute("id");
+                            this->addReadWarning(std::string("Multiproperties group ") + (groupC ? groupC : "(no id)")
+                                + " uses the multiply blend method, which we do not yet handle. "
+                                "It is blended as mix, so results might be suspect.");
+                            break;
+                        }
+                    }
+                }
                 err = handleMultiproperties(descendant);
             } else if (tag_name == "m:compositematerials") {
+                int compositeId = -1;
+                if (descendant->QueryIntAttribute("id", &compositeId) == tinyxml2::XML_SUCCESS) {
+                    this->compositeIds.insert(compositeId); // So an error about a multiproperties layer can name it
+                }
                 std::cerr << "Warning: We do not yet handle composite materials, so results might be suspect." << std::endl;
             } else {
                 // Use std::string for warning message formatting
@@ -2458,8 +2838,9 @@ SOP_Read3mf::handleTexture2d(tinyxml2::XMLElement* element) {
     Filters filter = Filters::AUTO; //default
     result = element->QueryStringAttribute("filter", &filterC);
     if (result == tinyxml2::XML_SUCCESS) {
-        addError(UT_ERROR_FATAL, "Warning: We do not yet handle filters on textures -- setting to default.");
-        std::cerr << "Warning: We do not yet handle filters on textures -- setting to default." << std::endl;
+        // Not fatal: we carry on with the default filter.
+        this->addReadWarning("This file sets a filter on a texture, which we do not yet handle. "
+            "The default filter is used instead.");
     }
 
     Tiling tilestyleu = Tiling::WRAP;  // set defaults
@@ -3234,6 +3615,10 @@ SOP_Read3mf::handleMultiproperties(XMLElement* element) {
         auto itc = colorDict.find(layer);
         auto itb = basematDict.find(layer);
         auto itt = texture2dgroupDict.find(layer);
+        // Node giving this layer's alpha, if it has one: a color layer's alpha bind, or a texture layer's
+        // inline VOP that samples the image's alpha. On a layer after the first, it drives the layermix
+        // that puts this layer over the ones beneath (wired up below).
+        OP_Node* layerAlphaNode = nullptr;
         
         // Create the shader node
         UT_String shaderName;
@@ -3299,11 +3684,18 @@ SOP_Read3mf::handleMultiproperties(XMLElement* element) {
             if (baseColorIdx >= 0) {
                 shaderNode->setInput(baseColorIdx, bindNodeColor, 0);
             }
-            // Connect the Bind VOP output (0) to the Shader's opac input (alpha)
-            int alphaIdx = shaderNode->getInputFromName("opac");
-            LOG_DEBUG(this->debug, "got alphaIdx as " << alphaIdx);
-            if (alphaIdx >= 0) {
-                shaderNode->setInput(alphaIdx, bindNodeAlpha, 0);
+            // The 3mf blend is accumulated = layer * alpha + accumulated * (1 - alpha). On the first layer
+            // there's nothing beneath, so the alpha is the surface's own opacity. On a later layer it is how
+            // much this layer covers the ones beneath, so it drives the layermix instead, and this shader
+            // stays fully opaque. (Putting it on opac here as well made the layer count for too much.)
+            if (first) {
+                int alphaIdx = shaderNode->getInputFromName("opac");
+                LOG_DEBUG(this->debug, "got alphaIdx as " << alphaIdx);
+                if (alphaIdx >= 0) {
+                    shaderNode->setInput(alphaIdx, bindNodeAlpha, 0);
+                }
+            } else {
+                layerAlphaNode = bindNodeAlpha;
             }
             LOG_DEBUG(this->debug, "finished color layer");
         } else if (itb != basematDict.end()) { // Is this a base material layer?
@@ -3415,6 +3807,37 @@ SOP_Read3mf::handleMultiproperties(XMLElement* element) {
                 shaderNode->setInput(uvIdx, bindNode, 0);
             }
 
+            // On a layer after the first, the texture's own alpha is how much this layer covers the ones
+            // beneath. The principled shader doesn't expose the alpha it samples, so sample it again in an
+            // Inline Code VOP, from the same texture path and uv binds, and use that to drive the layermix.
+            if (!first) {
+                UT_String alphaTexName;
+                alphaTexName.sprintf("alpha_texture_layer_%d_%d", id, i);
+                OP_Node* alphaTexNode = matnetNet->createNode("inline", alphaTexName);
+                if (!alphaTexNode) {
+                    std::cerr << "Warning: could not create the Inline Code VOP for the alpha of multiproperties layer "
+                              << i << " of group " << id << "; that layer will be blended as fully opaque." << std::endl;
+                } else {
+                    // The inline VOP's inputs take their names from the bind outputs wired into them, which are
+                    // the attribute names.
+                    alphaTexNode->setInput(0, bindTextureNode, 0);
+                    alphaTexNode->setInput(1, bindNode, 0);
+                    // VEX texture() uses Houdini's (and 3mf's) uv convention, v = 0 at the bottom, so no flip here.
+                    // Houdini pastes every inline VOP's code into the same shader function, so the local variable
+                    // gets a name unique to this group and layer; otherwise two texture layers collide.
+                    UT_String alphaCode;
+                    alphaCode.sprintf("vector4 texclr_%d_%d = texture($%s, $%s.x, $%s.y);\n$alpha = texclr_%d_%d.w;",
+                                      id, (int)i, attrTextureName.buffer(), attrName.buffer(), attrName.buffer(),
+                                      id, (int)i);
+                    // CH_STRING_LITERAL, so the $ names are kept as written and not expanded as variables.
+                    alphaTexNode->setString(alphaCode, CH_STRING_LITERAL, "code", 0, 0.0f);
+                    alphaTexNode->setString(UT_String("alpha"), CH_STRING_LITERAL, "outname1", 0, 0.0f);
+                    alphaTexNode->setString(UT_String("float"), CH_STRING_LITERAL, "outtype1", 0, 0.0f);
+                    LOG_DEBUG(this->debug, "Created alpha texture node with code " << alphaCode);
+                    layerAlphaNode = alphaTexNode;
+                }
+            }
+
 
         } else {
             LOG_DEBUG(this->debug, "Layer " << layer << " is an unsupported resource type (not color/basematerial/texture).");
@@ -3432,7 +3855,7 @@ SOP_Read3mf::handleMultiproperties(XMLElement* element) {
         mixName.sprintf("mix_layer_%d_%d", id, i);
         OP_Node* layerMix = ((OP_Network*) matnetNode)->createNode("layermix", mixName);
         if (!layerMix) {
-            std::cerr << "Error: unable to create layermix node for multi-properties." << std::endl;
+            std::cerr << "Error: unable to create layermix node for multiproperties." << std::endl;
             return ErrorCode::OTHER;
         }
         lastShaderNode = layerMix;
@@ -3449,7 +3872,24 @@ SOP_Read3mf::handleMultiproperties(XMLElement* element) {
         }
         layerMix->setRender(true);
         layerMix->setDisplay(true);
-        layerMix->setFloat("alpha", 0, 0, 0.5f); // These parameters have these values by default, but just in case...
+        // How much of this layer goes over the accumulated layers beneath: a color layer's per-vertex alpha
+        // (its bind), or a texture layer's alpha sampled from the image (the inline VOP's "alpha" output).
+        if (layerAlphaNode) {
+            int mixAlphaIdx = layerMix->getInputFromName("alpha");
+            int alphaOutIdx = layerAlphaNode->getOutputFromName("alpha");
+            if (alphaOutIdx < 0) {
+                alphaOutIdx = 0; // A bind's value is its first output.
+            }
+            if (mixAlphaIdx >= 0) {
+                layerMix->setInput(mixAlphaIdx, layerAlphaNode, alphaOutIdx);
+            } else {
+                std::cerr << "Warning: layermix alpha input not found; multiproperties layer " << i
+                          << " of group " << id << " will be blended as fully opaque." << std::endl;
+                layerMix->setFloat("alpha", 0, 0, 1.0f);
+            }
+        } else {
+            layerMix->setFloat("alpha", 0, 0, 1.0f);
+        }
         layerMix->setInt("surfacemode", 0, 0, 0);
         layerMix->setInt("dispmode", 0, 0, 0);
         //if (layerMix->getDisplay()) {
@@ -3525,11 +3965,11 @@ SOP_Read3mf::handleMultiproperties(XMLElement* element) {
                 pindicesList.push_back(static_cast<int>(val));
                 pindices_cstr = next; // Move the pointer to the start of the next number
             }
-	    // Per the 3MF Materials spec, a single pindices value applies to every layer
-	    // when a multiproperties group has more than one.
-	    if (pindicesList.size() == 1 && layersList.size() > 1) {
-		int singleValue = pindicesList[0]; // copy out first, to avoid assign() aliasing its own storage
-    		pindicesList.assign(layersList.size(), singleValue);
+	    // The 3MF Materials spec: if the pindices list is shorter than the pids list, consumers MUST use an
+	    // index of zero for the pindices that are missing. (Extra pindices MUST be ignored, which happens on
+	    // its own since everything that uses pindices only looks at one per layer.)
+	    if (pindicesList.size() < layersList.size()) {
+		pindicesList.resize(layersList.size(), 0);
 	    }
 
             /*
@@ -3586,6 +4026,16 @@ SOP_Read3mf::handleBuild(XMLElement* element) {
                 objectID = std::stoi(objectID_cstr);
             } catch (const std::invalid_argument& e) { // if string can't be converted
                 std::cerr << "Error: An objectID in a build item was not a valid integer: " << e.what() << std::endl;
+                return ErrorCode::BAD_3MF;
+            }
+            // Same as for components: we only read the root model file.
+            std::string otherFile;
+            if (refersToOtherModelFile(descendant, this->rootModelPart, otherFile)) {
+                std::string msg = "A build item refers to object " + std::to_string(objectID) + " in the model file '"
+                    + otherFile + "', but only the root model file of a 3mf package is currently read. Models split across "
+                    "several model files are not supported.";
+                std::cerr << "Error: " << msg << std::endl;
+                this->addError(SOP_MESSAGE, msg.c_str());
                 return ErrorCode::BAD_3MF;
             }
             const char* transform_cstr = descendant->Attribute("transform");
@@ -3652,6 +4102,10 @@ SOP_Read3mf::colorFromTexture(const TextureGroupData &textureData, int pindex, P
         std::cerr << "Unable to get color of pixel in default texture for an object " << std::endl;
         return ErrorCode::OTHER;
     }
+    // Texture pixels are sRGB-encoded 8-bit values, just like the 3mf colors. Alpha is left as it is.
+    if (this->convertSRGB) {
+        decodeSRGB(returnColor);
+    }
     LOG_DEBUG(this->debug, "Got color " << returnColor);
     LOG_DEBUG(this->debug, "Returning from colorFromTexture");
 
@@ -3713,7 +4167,9 @@ SOP_Read3mf::colorFromMulti(const MultiData &multiData, int pindex, PixelColor &
             colorsToBlend.push_back(color);
         } else {
             LOG_DEBUG(this->debug, "Whatever this multitype is, we don't handle it");
-            std::cerr << "Error: MultiType that we don't handle." << std::endl;
+            std::string msg = unsupportedLayerMessage(this->compositeIds, multiData.id, pid);
+            std::cerr << "Error: " << msg << std::endl;
+            this->addError(SOP_MESSAGE, msg.c_str());
             return ErrorCode::OTHER;
         }
     }
@@ -4062,6 +4518,18 @@ SOP_Read3mf::handleComponent(XMLElement* element, int parentID) {
         return ErrorCode::BAD_3MF;
     }
     LOG_DEBUG(false, "We got component object id " << id);
+
+    // We only read the root model file. If the component's object is in another one, say so instead of
+    // looking for that object id among the root file's objects, where it either isn't or is a different one.
+    std::string otherFile;
+    if (refersToOtherModelFile(element, this->rootModelPart, otherFile)) {
+        std::string msg = "A component refers to object " + std::to_string(id) + " in the model file '" + otherFile
+            + "', but only the root model file of a 3mf package is currently read. Models split across several model files "
+            "are not supported.";
+        std::cerr << "Error: " << msg << std::endl;
+        this->addError(SOP_MESSAGE, msg.c_str());
+        return ErrorCode::BAD_3MF;
+    }
     const char *xform_cstr = element->Attribute("transform");
     if (xform_cstr == nullptr) {
         LOG_DEBUG(false, "with no xform");
@@ -4832,7 +5300,9 @@ SOP_Read3mf::handleTriangle(XMLElement* element, int& numTriangles, const int ob
                 printMap(multiDict, "multiDict", this->debug);
                 LOG_DEBUG(this->debug, "texture cycle");
             } else {
-                std::cerr << "Error: Unknown type of multiproperty on a layer." << std::endl;
+                std::string msg = unsupportedLayerMessage(this->compositeIds, groupID, (*multiPids)[i]);
+                std::cerr << "Error: " << msg << std::endl;
+                this->addError(SOP_MESSAGE, msg.c_str());
                 return ErrorCode::OTHER;
             }
         }

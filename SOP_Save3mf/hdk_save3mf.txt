@@ -16,18 +16,30 @@ detail color, along with file-based and base-color textures.
 The whole input is currently written out as a single 3mf object.
 
 TIP:
-    You can drive the Mesh Name, File Name, and Title from upstream
-    data instead of typing them in by hand. Add a Detail Wrangle
-    before this node and set the string detail attributes
-    `out_mesh`, `out_filename`, and `out_title` to whatever your
-    setup computes. This lets you compute the strings directly in
+    You can drive the Mesh Name, File Name, Title, Description, and
+    Designer from upstream data instead of typing them in by hand.
+    Add a Detail Wrangle before this node and set the string detail
+    attributes `out_mesh`, `out_filename`, `out_title`,
+    `out_description`, and `out_designer` to whatever your setup
+    computes. This lets you compute the strings directly in
     VEX from the geometry's own attributes and content, rather than
     having to reference that data back through a parameter
     expression.
 
     If you leave the corresponding parameter blank, the detail
     attribute is used. If you type a value directly into the
-    parameter, that value always wins over the attribute.
+    parameter, that value always wins over the attribute, and the
+    node shows a warning saying the attribute was ignored. Mesh
+    Name, File Name, and Title have default values, so clear them to
+    use the attributes.
+
+    These mirror the `in_title`, `in_description`, and `in_designer`
+    detail attributes that [Node:sop/hdk_read3mf] sets from a file's
+    metadata. To keep a file's metadata when you read it and save it
+    back, copy them across in a Detail Wrangle, for example
+    `s@out_title = s@in_title;`.
+    (`out_meshname` also still works for the mesh name, for setups
+    made with earlier versions.)
 
 @parameters
 
@@ -43,6 +55,18 @@ Uses Shader Override:
     Shader Override option enabled, so the per-primitive texture
     assignments captured on import (in the `material_override`
     attribute) are read back out correctly on export.
+
+Convert sRGB:
+    #id: convertSRGB
+    Encode Houdini's linear `Cd` colors as sRGB when writing them,
+    since 3mf colors are sRGB by the spec. With this on, colors look
+    the same in a slicer, in other viewers, and on the printed part
+    as they did in Houdini's viewport. Applies to point, vertex,
+    primitive, and detail colors, and to the base color of plain
+    (non-texture) shaders. Texture image files are not changed. On
+    by default. Turn it off only to reproduce files written by
+    Save3mf 3.0 or earlier, which wrote the linear values
+    unconverted.
 
 Debug:
     #id: debug
@@ -91,12 +115,14 @@ Title (optional):
 Description (optional):
     #id: description
     Optional description written into the 3mf file's metadata
-    header.
+    header. Overridden by the `out_description` detail attribute if
+    this is left blank — see the tip above.
 
 Designer (optional):
     #id: designer
     Optional designer name written into the 3mf file's metadata
-    header.
+    header. Overridden by the `out_designer` detail attribute if
+    this is left blank — see the tip above.
 
 Save:
     #id: saveBtn

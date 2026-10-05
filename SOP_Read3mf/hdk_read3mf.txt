@@ -12,15 +12,48 @@ Read3mf unpacks a 3mf archive and imports its geometry, along with
 color and texture information where present.
 
 WARNING:
-    Multi-property triangles (a triangle referencing more than one
-    property/resource at once, per the 3mf Materials Specification)
-    are not currently supported on import.
+    Multiproperties (a triangle combining several properties at once,
+    per the 3mf Materials Specification) are supported, with
+    colorgroup, texture, and base material layers and their alphas,
+    except for the `multiply` blend method. A multiproperties group
+    whose `blendmethods` asks for `multiply` is currently blended with
+    the default `mix` instead, and Read3mf puts a warning on the node
+    naming the group.
 
 WARNING:
     The Composite Materials extension (`<m:compositematerials>`) is
-    not supported. A multiproperties layer that references a
-    composite-materials resource is cleanly rejected with an error
-    rather than silently producing an incorrect result.
+    not currently supported. A composite materials group that an
+    object or triangle refers to directly is skipped, with a warning
+    in the console, and whatever refers to it gets the object's
+    default color. A composite materials group used as a layer of a
+    multiproperties group makes the import fail with an error
+    whenever that multiproperties group is used.
+
+WARNING:
+    Only the root model file of a 3mf package is currently read.
+    Models whose objects live in other model files (the Production
+    Extension's `p:path` attribute on components and build items)
+    are not supported. The other files are not parsed, and the
+    import stops with an error naming the file as soon as it meets a
+    component or build item that points into one.
+
+WARNING:
+    Read3mf currently understands only the Materials and Production
+    extensions. If a file says it requires any other 3mf extension
+    (such as Slice or Beam Lattice), Read3mf still reads it, but puts
+    a warning on the node naming those extensions. Anything in the
+    file that depends on them is ignored, so the result may be
+    incomplete or wrong.
+
+WARNING:
+    Files written by Save3mf 3.0 or earlier hold Houdini's linear
+    colors written as if they were sRGB, so with Convert sRGB on
+    they import darker than the originals. The `in_application`
+    detail attribute (or the file's Application metadata) shows
+    which version wrote a file. Read3mf puts a warning on the node
+    when it sees such a file with colors the conversion would
+    change. Turn Convert sRGB off and press Read again to
+    reproduce the original colors.
 
 == Imported Attributes ==
 
@@ -62,6 +95,20 @@ the materials it builds, named after the node with `_subnet`
 appended (e.g. a node named `read3mf1` gets a sibling subnet named
 `read3mf1_subnet`). Inside that subnet is a matnet named
 `3mf_materials` containing the actual shader(s).
+
+For multiproperties, each layer is laid over the ones beneath it by
+its own alpha: a colorgroup color's alpha, or the alpha channel of a
+texture image (so a PNG with transparent or partly transparent areas
+lets the layers beneath show through there).
+
+NOTE:
+    Layers are blended in linear light, as the 3mf Materials
+    Specification recommends. Some other applications, including the
+    renderer that made the thumbnails in the 3mf Consortium's test
+    suites, blend the sRGB values directly instead. Their blends come
+    out darker, and a dark layer that is only partly opaque over a
+    bright one shows up more strongly in them, so expect blended areas
+    to look lighter and smoother in Houdini than in those images.
 
 NOTE:
     The subnet is destroyed and rebuilt fresh every time Read is
@@ -105,6 +152,20 @@ Shader Override:
     Intended to pair with [Node:sop/hdk_save3mf]'s own Uses Shader
     Override option, so a round-tripped part re-exports its texture
     assignments correctly.
+
+Convert sRGB:
+    #id: convertSRGB
+    Decode the colors in the file from sRGB to Houdini's linear
+    `Cd`, so the geometry looks the way the file's colors look in a
+    slicer or other application. Applies to colorgroup colors, base
+    material colors, and the texture pixels sampled to set the
+    default color of a textured object. Alpha is not changed, and
+    texture image files are not modified. Multiproperties layers
+    are blended after decoding, so the blend happens in linear
+    light. Takes effect the next time Read is pressed. Leave this
+    on for files from other applications. Turn it off for files
+    written by Save3mf 3.0 or earlier, which stored linear values
+    unconverted (see the warning at the top of this page).
 
 Debug:
     #id: debug

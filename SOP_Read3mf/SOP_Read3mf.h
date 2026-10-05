@@ -45,6 +45,7 @@
 #include <array>
 #include <map>
 #include <unordered_map>
+#include <unordered_set>
 #include <chrono>
 #include <sstream>
 #include <iostream>
@@ -396,6 +397,7 @@ namespace HDK_Sample {
         bool                BUILD(fpreal t) { return evalInt("build", 0, t); }
         bool                GEO(fpreal t) { return evalInt("geo", 0, t); }
         bool                OVERRIDE(fpreal t) { return evalInt("overrideShader", 0, t); }
+        bool                CONVERTSRGB(fpreal t) { return evalInt("convertSRGB", 0, t); }
         bool                TIMER(fpreal t) { return evalInt("timer", 0, t); }
         void                FILENAME(std::string& my_file, fpreal t)    { UT_StringHolder result; evalString(result, "filename", 0, t); my_file = result.toStdString(); return;}
         void                ASSETS(std::string& my_assets, fpreal t)   { UT_StringHolder result; evalString(result, "assets", 0, t); my_assets = result.toStdString(); return;}
@@ -403,6 +405,7 @@ namespace HDK_Sample {
         std::string         filename;
         bool                flip = true;
         bool                overrideShader = false;
+        bool                convertSRGB = true;
         bool                timer = false;
         bool                build = true;
         bool                geoOnly = false;
@@ -438,6 +441,10 @@ namespace HDK_Sample {
         // Name of the model file. This will need to be expanded if there's more than one. XXX
         std::string     theModel;
 
+        // Name of the root model file inside the 3mf package (e.g. "3D/3dmodel.model"), as opposed to its path on
+        // disk. Set in cookMySop(), and used to tell references to the root file from references to other files.
+        std::string     rootModelPart;
+
 	// Metadata we capture from the 3mf header which we add as detail attributes to the model.
 	std::string importedTitle;
 	std::string importedDescription;
@@ -446,12 +453,34 @@ namespace HDK_Sample {
 	std::string importedCopyright;
 	std::string importedModificationDate;
 
+        // True if we decoded colors from sRGB in a file written by a Save3mf older than 3.1, which never
+        // encoded them, and the decode changed at least one of them. Set in parseModel(), reset in clearData(),
+        // and used to keep a warning on the node.
+        bool            oldSaveColorsDecoded = false;
+        void            warnOldSaveColorsDecoded();
+
+        // The 3mf extensions the file requires (its requiredextensions) that we don't support, described for
+        // a warning, or empty if there are none. Set in parseModel(), reset in clearData(), and used to keep
+        // a warning on the node.
+        std::string     unsupportedExtensions;
+        void            warnUnsupportedExtensions();
+
+        // Warnings found while reading the file in the read() callback (e.g. a multiproperties group using the
+        // multiply blend method). Reset in clearData(), and put on the node during each cook.
+        std::vector<std::string>    readWarnings;
+        void            addReadWarning(const std::string &message);
+        void            warnReadWarnings();
+
         // XXXXX Flags to show which kinds of resources the model uses
         bool            hasColor = false;       // Colorgroup found
         bool            hasTexture = false;     // Texture2dgroup found
         bool            hasBase = false;        // Base material found
         bool            hasMulti = false;       // Multi-properties found
         bool            hasComp = false;        // Composite material found
+
+        // Ids of the composite materials groups in the file. We don't handle them, but knowing which ids they are
+        // lets the error for a multiproperties layer that uses one say so.
+        std::unordered_set<int> compositeIds;
 
         // key: object id, value: the object's default color and a GU_Detail for the object
         UT_Map<int, ObjectData*>                 objectDict;

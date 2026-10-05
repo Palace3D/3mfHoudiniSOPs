@@ -99,6 +99,46 @@ needed. No restart required; Houdini's help browser picks these up
 on demand. The filenames must match the SOPs' internal operator
 names (`hdk_save3mf`, `hdk_read3mf`), not their Tab-menu labels.
 
+## Color Handling
+
+3mf colors are sRGB, but Houdini's `Cd` is linear. Both SOPs have a
+**Convert sRGB** toggle, on by default, that converts between the
+two: `Save3mf` encodes `Cd` as sRGB when it writes, and `Read3mf`
+decodes the file's colors back to linear when it reads. Without the
+conversion, colors made in Houdini look darker once they leave it
+(in a slicer, in other viewers, and on the printed part) than they
+did in the viewport. Texture images are not changed either way.
+
+**Files from Save3mf 3.0 and earlier.** Before version 3.1,
+`Save3mf` wrote linear `Cd` values into the file without converting
+them. Those files hold the right numbers for Houdini but the wrong
+ones for everything else, which is why parts exported that way print
+darker than expected. The writing version is recorded in the file's
+`Application` metadata (`Houdini 3MF Export 3.0`), and `Read3mf`
+puts it in the `in_application` detail attribute.
+
+When `Read3mf` sees such a file with Convert sRGB on, and colors the
+conversion would change, it puts a warning on the node. To get the
+original colors back, turn Convert sRGB **off** on `Read3mf` and
+press Read. To repair the file itself, read it with Convert sRGB off
+and save it with Convert sRGB on. Re-exporting from the original
+scene is better if you still have it, since the old files kept the
+linear values in 8 bits and the dark tones are coarse.
+
+Files from other applications are sRGB by the spec, so leave
+Convert sRGB on for them.
+
+**Multiproperties blending.** When `Read3mf` stacks multiproperties
+layers, each layer goes over the ones beneath it by its own alpha (a
+colorgroup color's alpha, or a texture image's alpha channel). The
+blend is done in linear light, as the 3mf Materials Specification
+recommends. Some other applications, including the renderer behind the
+thumbnails in the 3mf Consortium's test suites, blend the sRGB values
+directly, which makes blends darker and lets a dark, partly opaque
+layer show more strongly over a bright one. So blended areas can look
+lighter and smoother in Houdini than in those thumbnails; that
+difference is expected.
+
 ## Debug Logging
 
 Both SOPs have a `Debug` toggle that prints extra diagnostic
@@ -128,12 +168,35 @@ Not vendored — install via your platform's package manager
 
 ## Status and Limitations
 
-- We currently cannot import 3mf files using multi-properties.
-  Many examples will work, but not all — this is a known,
-  ongoing limitation (currently caused by how layers are being
-  mapped onto Houdini shaders).
-- We do not correctly handle 3mf files that use the Composite
-  Materials extension (`<m:compositematerials>`). A multiproperties
-  layer referencing a composite-materials resource is not parsed as
-  color, base material, or texture, so it's cleanly rejected with an
-  error rather than silently misinterpreted.
+- Multiproperties are supported, with colorgroup, texture, and base
+  material layers and their alphas, except for the `multiply` blend
+  method. A multiproperties group whose `blendmethods` asks for
+  `multiply` is currently blended with the default `mix` instead, and
+  Read3mf puts a warning on the node naming the group.
+- Texture `filter` settings are not currently supported. A texture
+  that sets one is read with the default filter, and Read3mf puts a
+  warning on the node.
+- Save3mf currently writes the whole input as a single 3mf object.
+  A part read from a file with several objects is therefore saved
+  back as one object; the `object_id` and `mesh_name` attributes
+  Read3mf adds are not used when saving.
+- We do not currently support the Composite Materials extension
+  (`<m:compositematerials>`). A composite materials group that an
+  object or triangle refers to directly is skipped, with a warning
+  in the console, and whatever refers to it gets the object's
+  default color (white if the object has none). A composite
+  materials group used as a layer of a multiproperties group makes
+  the import fail with an error whenever that multiproperties group
+  is used.
+- We currently read only the root model file in a 3mf package. Models
+  whose objects live in other `.model` files, which the Production
+  Extension allows through a `p:path` attribute on components and
+  build items, are not supported. The other files are not parsed,
+  and the import stops with an error naming the file as soon as it
+  meets a component or build item that points into one.
+- Read3mf currently understands only the Materials and Production
+  extensions. A file can list the extensions it can't be read
+  correctly without (its `requiredextensions`); if that list names any
+  others, such as Slice or Beam Lattice, Read3mf still reads the file
+  but puts a warning on the node naming them, since whatever depends on
+  them is ignored.
