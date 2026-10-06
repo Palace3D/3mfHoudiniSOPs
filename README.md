@@ -7,12 +7,33 @@ Builds and runs on both Linux and Windows.
 
 ## Installation
 
-These folders are designed to be built within the Houdini HDK
-samples hierarchy.
+These SOPs are built from source against your own Houdini install,
+using the HDK (Houdini Development Kit) that comes with every copy of
+Houdini, in `$HFS/toolkit/`. They have been built and tested with
+**Houdini 22.0**. A plugin built for one Houdini version (e.g. 22.0)
+will not load in another (e.g. 20.5): you have to build it against
+the version you'll run it in, and older versions may need small code
+changes.
 
-1. Place the `SOP_Save3mf` and `SOP_Read3mf` folders in
-   `$HFS/toolkit/samples/SOP/`.
+1. Clone this repository, or download it as a ZIP from GitHub's
+   **Code** button and unzip it, anywhere you like in a folder you
+   own (e.g. `C:\Users\<you>\Documents\src\` on Windows, or
+   `~/src/` on Linux):
+   ```
+   git clone https://github.com/Palace3D/3mfHoudiniSOPs.git
+   ```
+   This gives you a `3mfHoudiniSOPs` folder containing the
+   `SOP_Read3mf` and `SOP_Save3mf` folders you'll build in. The
+   build finds Houdini through the `HFS` environment variable, so
+   the source doesn't need to be inside Houdini's install or its
+   `toolkit` folder. (Avoid putting it inside Houdini's own install
+   under `C:\Program Files`: Windows only lets an administrator write
+   there.)
 2. Follow the platform-specific build steps below.
+
+Throughout, `houdiniX.Y` means the folder for **your** Houdini
+version, e.g. `houdini22.0` or `houdini20.5`. Copying an example path
+with the wrong version in it is an easy mistake to make.
 
 ### Building on Fedora / Linux
 
@@ -21,7 +42,14 @@ Prerequisites: a C++ compiler (gcc), CMake, and the `minizip` and
 `minizip-devel`, and `zlib-devel`, depending on your distro's
 package names).
 
-From inside each SOP's folder:
+First set up Houdini's environment in your shell, so CMake can find
+the HDK. This sets `HFS`, and without it the configure step fails
+because it can't find Houdini:
+```
+cd /opt/hfsX.Y.ZZZ
+source houdini_setup
+```
+Then, from inside each SOP's folder:
 ```
 mkdir build && cd build
 cmake ..
@@ -32,15 +60,17 @@ automatically via `houdini_configure_target()`.
 
 ### Building on Windows
 
-Prerequisites:
-- **Visual Studio** (Community edition is fine) with the
-  **Desktop development with C++** workload. Check
-  `hcustom --output_compiler_range` (from Houdini's Command Line
-  Tools shell) for the exact accepted compiler version range for
-  your Houdini install.
-- **CMake** (standalone install from cmake.org, added to `PATH`).
+#### Prerequisites
+
+- **Visual Studio**, with the **Desktop development with C++**
+  workload. The free Community edition is fine. Note that Visual
+  Studio is a different product from Visual Studio Code; VS Code
+  does not include the C++ compiler you need.
+- **CMake**, the standalone install from cmake.org, added to `PATH`
+  (the installer offers this).
+- **Git**, which vcpkg needs.
 - **[vcpkg](https://github.com/microsoft/vcpkg)**, with minizip
-  installed:
+  installed. Install Visual Studio first; vcpkg uses its compiler.
   ```
   git clone https://github.com/microsoft/vcpkg
   cd vcpkg
@@ -48,37 +78,106 @@ Prerequisites:
   .\vcpkg install minizip
   ```
 
-From inside each SOP's folder, using hcmd.exe, Houdini's **Command Line
-Tools** shell (Start menu, under Houdini's install; this loads the
-`HFS` environment variable CMake needs) for the configure step:
+#### Check your compiler version
+
+Each Houdini version only loads plugins built with a certain range
+of Microsoft C++ compiler versions. A brand-new Visual Studio can
+easily be *newer* than an older Houdini accepts, and the plugin then
+fails to load with "Incompatible compiler versions". Check before
+you build:
+
+1. Open Houdini's **Command Line Tools** shell (Start menu, under
+   your Houdini install; it runs `hcmd.exe`) and run:
+   ```
+   hcustom --output_compiler_range
+   ```
+   It prints the oldest and newest compiler versions this Houdini
+   accepts, as numbers like `19.38`.
+2. When you configure (below), CMake prints the compiler it found,
+   e.g. `The CXX compiler identification is MSVC 19.44.xxxxx`.
+3. If your compiler is outside the range, install a matching one
+   alongside your current Visual Studio: open the **Visual Studio
+   Installer**, choose **Modify**, go to **Individual components**,
+   search for "MSVC", and tick a "MSVC v143 - VS 2022 C++ x64/x86
+   build tools" entry whose version fits. Compiler 19.**NN** comes
+   from build tools 14.**NN**. Then add `-T v143,version=14.NN` to
+   the configure command below, and check that CMake now reports the
+   older compiler.
+
+#### Build
+
+Use Houdini's **Command Line Tools** shell, which sets the `HFS`
+variable CMake needs. (It doesn't need to run as administrator, as
+long as the source is in a folder you own.) From inside each SOP's
+folder:
 ```
 cmake -B build -S . -DCMAKE_TOOLCHAIN_FILE=<path-to-vcpkg>/scripts/buildsystems/vcpkg.cmake
 cmake --build build --config Release
 ```
-The second command (the actual build) can be re-run from a regular
-terminal afterward — only the first (configure) step needs
-Houdini's environment. This installs the built `.dll` (plus its
-`minizip.dll`/`z.dll` runtime dependencies) into
-`%HOMEPATH%\Documents\houdiniX.Y\dso\` automatically.
+**Don't leave out `--config Release`.** Without it, Visual Studio
+makes a Debug build, which Houdini won't load. (A sign of this is
+`zd.dll` and `minizipd.dll`, with a "d" at the end, appearing in your
+`dso` folder.)
 
-**Required extra step — add the `dso` folder to `PATH` via
-`houdini.env`.** Without this, the plugin builds fine but fails to
-load in Houdini with no visible error message in the normal GUI.
-Windows doesn't reliably resolve a plugin DLL's own sibling
-dependencies (here, `minizip.dll`/`z.dll`) from the same folder
-it's loaded from. Add this line to
-`%HOMEPATH%\Documents\houdiniX.Y\houdini.env`:
-```
-PATH = "<your-houdini-user-pref-dir>/dso;$PATH"
-```
-e.g. `C:/Users/<you>/Documents/houdini22.0/dso;$PATH`. Houdini
-reads `houdini.env` automatically at every startup.
+This installs the built `.dll` (plus its `minizip.dll`/`z.dll`
+runtime dependencies) into your `houdiniX.Y\dso\` folder
+automatically.
 
-If a node doesn't appear in the Tab menu after building, the
-plugin likely failed to load silently. To see the actual reason,
-set `HOUDINI_DSO_ERROR=2` in your environment and launch
-`hbatch.exe` (not `houdinifx.exe` — the GUI executable doesn't
-print to a console) from a terminal.
+If you change anything about the compiler or the Houdini version,
+delete the `build` folder and configure again: CMake remembers the
+compiler it chose the first time.
+
+#### Add the `dso` folder to `PATH`
+
+**This step is required.** Without it, the plugin builds fine but
+fails to load in Houdini, with no visible error message in the
+normal GUI. Windows doesn't reliably find a plugin DLL's own
+dependencies (here, `minizip.dll` and `z.dll`) in the folder the
+plugin is loaded from.
+
+First find your Houdini user preferences folder. It is usually
+`C:\Users\<you>\Documents\houdiniX.Y`, but if your Documents folder
+is synced by OneDrive it may be somewhere like
+`C:\Users\<you>\OneDrive - <Company>\Documents\houdiniX.Y`. To be
+sure, open Houdini's **Python Shell** (Windows menu) and run:
+```
+hou.homeHoudiniDirectory()
+```
+In that folder, open (or create) `houdini.env` in a text editor and
+add this line, using that folder's path with forward slashes and
+keeping the quotes:
+```
+PATH = "<your-houdini-user-pref-folder>/dso;$PATH"
+```
+e.g. `PATH = "C:/Users/<you>/Documents/houdini22.0/dso;$PATH"`.
+Houdini reads `houdini.env` at every startup. To check that it
+took, run `import os; print(os.environ["PATH"])` in the Python
+Shell and look for your `dso` folder.
+
+#### Troubleshooting
+
+If a node doesn't appear in the Tab menu after building, the plugin
+failed to load. To see why, set the environment variable
+`HOUDINI_DSO_ERROR=2` and launch `hbatch.exe` (not `houdinifx.exe`,
+which has no console to print to) from a terminal. Then:
+
+- **"Couldn't load ... z.dll" or "... minizip.dll", "Missing version
+  information."** Harmless. Houdini tries every DLL in `dso` as a
+  plugin, and these two are libraries, not plugins. You'll only see
+  these messages with `HOUDINI_DSO_ERROR` set.
+- **"Couldn't load ... SOP_Read3mf.dll", "Incompatible compiler
+  versions."** Your compiler is outside this Houdini's range. See
+  "Check your compiler version" above.
+- **"Couldn't load ... SOP_Read3mf.dll", "The specified module could
+  not be found."** The plugin was found, but a DLL it needs wasn't.
+  Check the `PATH` step above, and that you built with `--config
+  Release`. To list exactly what the plugin needs, run this from a
+  Visual Studio "Developer Command Prompt":
+  ```
+  dumpbin /dependents <path-to-your-dso-folder>\SOP_Read3mf.dll
+  ```
+  Any name ending in `D.dll` (like `MSVCP140D.dll`) means a Debug
+  build.
 
 ## Node Help
 
