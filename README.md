@@ -230,6 +230,7 @@ Convert sRGB on for them.
 **Multiproperties blending.** When `Read3mf` stacks multiproperties
 layers, each layer goes over the ones beneath it by its own alpha (a
 colorgroup color's alpha, or a texture image's alpha channel). The
+first layer is always treated as fully opaque, as the spec says. The
 blend is done in linear light, as the 3mf Materials Specification
 recommends. Some other applications, including the renderer behind the
 thumbnails in the 3mf Consortium's test suites, blend the sRGB values
@@ -269,9 +270,17 @@ Not vendored — install via your platform's package manager
 
 - Multiproperties are supported, with colorgroup, texture, and base
   material layers and their alphas, except for the `multiply` blend
-  method. A multiproperties group whose `blendmethods` asks for
-  `multiply` is currently blended with the default `mix` instead, and
-  Read3mf puts a warning on the node naming the group.
+  method. If a multiproperties group's `blendmethods` asks for
+  `multiply`, the import currently stops with an error naming the
+  group; turn on Only Geometry to import the shape without colors.
+- When a multiproperties group's first layer is a base material, the
+  3mf spec recommends blending the layers above it on their own and
+  then laying the result over the material. Read3mf currently blends
+  all the layers in order instead. That gives the same colors wherever
+  the second layer is fully opaque, but can differ where it is partly
+  transparent. Read3mf checks the second layer's alphas and puts a
+  warning on the node, naming the group, only when that layer can be
+  partly transparent.
 - Texture `filter` settings are not currently supported. A texture
   that sets one is read with the default filter, and Read3mf puts a
   warning on the node.

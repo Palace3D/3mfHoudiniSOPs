@@ -12,40 +12,6 @@ Read3mf unpacks a 3mf archive and imports its geometry, along with
 color and texture information where present.
 
 WARNING:
-    Multiproperties (a triangle combining several properties at once,
-    per the 3mf Materials Specification) are supported, with
-    colorgroup, texture, and base material layers and their alphas,
-    except for the `multiply` blend method. A multiproperties group
-    whose `blendmethods` asks for `multiply` is currently blended with
-    the default `mix` instead, and Read3mf puts a warning on the node
-    naming the group.
-
-WARNING:
-    The Composite Materials extension (`<m:compositematerials>`) is
-    not currently supported. A composite materials group that an
-    object or triangle refers to directly is skipped, with a warning
-    in the console, and whatever refers to it gets the object's
-    default color. A composite materials group used as a layer of a
-    multiproperties group makes the import fail with an error
-    whenever that multiproperties group is used.
-
-WARNING:
-    Only the root model file of a 3mf package is currently read.
-    Models whose objects live in other model files (the Production
-    Extension's `p:path` attribute on components and build items)
-    are not supported. The other files are not parsed, and the
-    import stops with an error naming the file as soon as it meets a
-    component or build item that points into one.
-
-WARNING:
-    Read3mf currently understands only the Materials and Production
-    extensions. If a file says it requires any other 3mf extension
-    (such as Slice or Beam Lattice), Read3mf still reads it, but puts
-    a warning on the node naming those extensions. Anything in the
-    file that depends on them is ignored, so the result may be
-    incomplete or wrong.
-
-WARNING:
     Files written by Save3mf 3.0 or earlier hold Houdini's linear
     colors written as if they were sRGB, so with Convert sRGB on
     they import darker than the originals. The `in_application`
@@ -54,6 +20,9 @@ WARNING:
     when it sees such a file with colors the conversion would
     change. Turn Convert sRGB off and press Read again to
     reproduce the original colors.
+
+The Limitations section, below, lists the parts of the 3mf
+specifications Read3mf doesn't yet support.
 
 == Imported Attributes ==
 
@@ -99,7 +68,9 @@ appended (e.g. a node named `read3mf1` gets a sibling subnet named
 For multiproperties, each layer is laid over the ones beneath it by
 its own alpha: a colorgroup color's alpha, or the alpha channel of a
 texture image (so a PNG with transparent or partly transparent areas
-lets the layers beneath show through there).
+lets the layers beneath show through there). As the 3mf Materials
+Specification says, the first layer is always treated as fully
+opaque, whatever its own alpha.
 
 NOTE:
     Layers are blended in linear light, as the 3mf Materials
@@ -120,6 +91,56 @@ NOTE:
     order for deleting nodes during scene teardown, and destroying
     it from the node's own destructor risked crashes. Delete the
     subnet by hand if you no longer need it.
+
+== Limitations ==
+
+Read3mf supports the 3mf Core Specification and most of the
+Materials Specification. In each case below, Read3mf puts an error
+or warning on the node when a file is affected.
+
+- Multiproperties: the `multiply` blend method. Multiproperties
+  (a triangle combining several properties at once) are supported,
+  with colorgroup, texture, and base material layers and their
+  alphas, but not yet the `multiply` blend method. If a
+  multiproperties group's `blendmethods` asks for `multiply`, the
+  import stops with an error naming the group. Turn on Only Geometry
+  to import the shape without colors.
+
+- Multiproperties: a base material first layer. When a
+  multiproperties group's first layer is a base material, the 3mf
+  spec recommends blending the layers above it on their own and then
+  laying the result over the material. Read3mf currently blends all
+  the layers in order instead, which gives the same colors wherever
+  the second layer is fully opaque, but can differ where it is partly
+  transparent. Read3mf checks the second layer's alphas and puts a
+  warning on the node, naming the group, only when that layer can be
+  partly transparent.
+
+- Composite materials. The Composite Materials extension
+  (`<m:compositematerials>`) is not currently supported. A composite
+  materials group that an object or triangle refers to directly is
+  skipped, with a warning in the console, and whatever refers to it
+  gets the object's default color. A composite materials group used
+  as a layer of a multiproperties group makes the import stop with an
+  error naming the group whenever that multiproperties group is used.
+
+- Models in several files. Only the root model file of a 3mf
+  package is currently read. Models whose objects live in other model
+  files (the Production Extension's `p:path` attribute on components
+  and build items) are not supported. The other files are not parsed,
+  and the import stops with an error naming the file as soon as it
+  meets a component or build item that points into one.
+
+- Other extensions. Read3mf currently understands only the
+  Materials and Production extensions. If a file says it requires any
+  other 3mf extension (such as Slice or Beam Lattice), Read3mf still
+  reads it, but puts a warning on the node naming those extensions.
+  Anything in the file that depends on them is ignored, so the result
+  may be incomplete or wrong.
+
+- Texture filters. A texture's `filter` setting is not currently
+  supported. Such a texture is read with the default filter, and
+  Read3mf puts a warning on the node.
 
 @parameters
 
@@ -193,7 +214,12 @@ File Name:
 Asset Folder:
     #id: assets
     Folder into which the 3mf archive is unpacked (textures and
-    other referenced files land here during the read).
+    other referenced files land here during the read). Each Read
+    unpacks into a new subfolder, `<node name>/read-<number>`, so it
+    never overwrites files from an earlier read that a render view
+    may still have open. Older read folders for the node are deleted
+    on the next Read; any a renderer still has open are left until a
+    later one.
 
 Read:
     #id: readBtn

@@ -1069,6 +1069,48 @@ getFileInfo(std::string path, std::string &dir, std::string &stem, std::string &
 
 
 //
+// If the texture at path is grayscale (1 channel) or grayscale plus alpha (2 channels), write an RGB or RGBA
+// PNG copy beside it, and put the copy's path in newPath. Renderers don't all read 1- and 2-channel images
+// the same way (Houdini, for one, misreads gray-plus-alpha PNGs), but every one reads RGB and RGBA alike.
+// Images with 3 or 4 channels are left alone, with newPath set to path. Always PNG, so nothing is lost.
+// Returns true for success.
+//
+bool
+expandGrayTexture(const std::string &path, std::string &newPath, bool debug) {
+    newPath = path;
+    int width, height, numChannels;
+    if (!stbi_info(path.c_str(), &width, &height, &numChannels)) {
+        std::cerr << "Error: couldn't read texture " << path << std::endl;
+        return false;
+    }
+    if (numChannels >= 3) {
+        return true;
+    }
+    int outChannels = (numChannels == 2) ? 4 : 3;
+    unsigned char *data = stbi_load(path.c_str(), &width, &height, &numChannels, outChannels);
+    if (!data) {
+        std::cerr << "Error: couldn't read texture " << path << std::endl;
+        return false;
+    }
+    std::string dir;
+    std::string stem;
+    std::string suffix;
+    getFileInfo(path, dir, stem, suffix);
+    std::string expandedPath = dir + "/" + stem + (outChannels == 4 ? "-rgba" : "-rgb") + ".png";
+    int success = stbi_write_png(expandedPath.c_str(), width, height, outChannels, data, width * outChannels);
+    stbi_image_free(data);
+    if (!success) {
+        std::cerr << "Error: couldn't write a new version of texture " << stem << suffix << " to: " << expandedPath
+            << std::endl;
+        return false;
+    }
+    LOG_DEBUG(debug, "Expanded grayscale texture " << path << " to " << expandedPath);
+    newPath = expandedPath;
+    return true;
+}
+
+
+//
 // Write out a new or revised texture file.
 // Should I use jpg quality of 100 or leave it at 90? XXX
 // Returns true for success.
@@ -1082,9 +1124,11 @@ writeNewTexture(std::string dir, std::string stem, std::string suffix, std::stri
 
     std::string newFilePath;    
     int success = 0;
-    if (numChannels == 4) {
+    // 4 channels is RGBA and 2 is gray + alpha. Both have alpha, so both need png.
+    if (numChannels == 4 || numChannels == 2) {
         if (strcmp(suffix.c_str(), ".png") != 0 && strcmp(suffix.c_str(), ".PNG") != 0) {
-            std::cerr << "Warning: changing texture from " + suffix + " to .png to accommodate alpha channel." << std::endl;
+            std::cerr << "Warning: changing texture " + stem + suffix + " from " + suffix
+                + " to .png to accommodate alpha channel (new file " + stem + addition + ".png)." << std::endl;
         }
         // create name of new texture file
         newFilePath = dir + "/" + stem + addition + ".png";
@@ -1093,8 +1137,9 @@ writeNewTexture(std::string dir, std::string stem, std::string suffix, std::stri
     } else {
         if (strcmp(suffix.c_str(), ".jpg") != 0 && strcmp(suffix.c_str(), ".JPG") != 0 && strcmp(suffix.c_str(), ".jpeg") != 0
             && strcmp(suffix.c_str(), ".JPEG") != 0) {
-            std::cerr << "Warning: changing texture from " + suffix
-                + " to .jpg since we lack an alpha channel and this gives us more compression." << std::endl;
+            std::cerr << "Warning: changing texture " + stem + suffix + " from " + suffix
+                + " to .jpg since we lack an alpha channel and this gives us more compression (new file "
+                + stem + addition + ".jpg)." << std::endl;
         }
         // create name of new texture file
         newFilePath = dir + "/" + stem + addition + ".jpg";
@@ -1103,7 +1148,8 @@ writeNewTexture(std::string dir, std::string stem, std::string suffix, std::stri
     }
 
     if (!success) {
-        std::cerr << "Error writing new image to: " << newFilePath << std::endl;
+        std::cerr << "Error: couldn't write a new version of texture " << stem << suffix << " to: " << newFilePath
+            << std::endl;
         return false;
     }
     newPath = newFilePath;
@@ -1126,9 +1172,11 @@ writeOpaqueTexture(std::string dir, std::string stem, std::string suffix, std::s
 
     std::string newFilePath;    
     int success = 0;
-    if (numChannels == 4) {
+    // 4 channels is RGBA and 2 is gray + alpha. Both have alpha, so both need png.
+    if (numChannels == 4 || numChannels == 2) {
         if (strcmp(suffix.c_str(), ".png") != 0 && strcmp(suffix.c_str(), ".PNG") != 0) {
-            std::cerr << "Warning: changing texture from " + suffix + " to .png to accommodate alpha channel." << std::endl;
+            std::cerr << "Warning: changing texture " + stem + suffix + " from " + suffix
+                + " to .png to accommodate alpha channel (new file " + stem + addition + ".png)." << std::endl;
         }
         // create name of new texture file
         newFilePath = dir + "/" + stem + addition + ".png";
@@ -1137,8 +1185,9 @@ writeOpaqueTexture(std::string dir, std::string stem, std::string suffix, std::s
     } else {
         if (strcmp(suffix.c_str(), ".jpg") != 0 && strcmp(suffix.c_str(), ".JPG") != 0 && strcmp(suffix.c_str(), ".jpeg") != 0
             && strcmp(suffix.c_str(), ".JPEG") != 0) {
-            std::cerr << "Warning: changing texture from " + suffix
-                + " to .jpg since we lack an alpha channel and this gives us more compression." << std::endl;
+            std::cerr << "Warning: changing texture " + stem + suffix + " from " + suffix
+                + " to .jpg since we lack an alpha channel and this gives us more compression (new file "
+                + stem + addition + ".jpg)." << std::endl;
         }
         // create name of new texture file
         newFilePath = dir + "/" + stem + addition + ".jpg";
@@ -1147,7 +1196,8 @@ writeOpaqueTexture(std::string dir, std::string stem, std::string suffix, std::s
     }
 
     if (!success) {
-        std::cerr << "Error writing new image to: " << newFilePath << std::endl;
+        std::cerr << "Error: couldn't write a new version of texture " << stem << suffix << " to: " << newFilePath
+            << std::endl;
         return false;
     }
     newPath = newFilePath;
@@ -2024,19 +2074,17 @@ SOP_Read3mf::read(void *data, int index, fpreal t, const PRM_Template *tplate) {
         return 0;
     }
 
-    // Set up parameters. We at least need the debug for logging.
-    // Nope -- these are now set in cookMySop even if read isn't pressed so values match GUI
-    //me->debug = me->DEBUG(t);
-    //me->flip = me->FLIP(t);
-    //me->overrideShader = me->OVERRIDE(t);
-    //me->build = me->BUILD(t);
-    //me->geoOnly = me->GEO(t);
-    //me->timer = me->TIMER(t);
-    //me->FILENAME(me->filename, t);
-    //me->ASSETS(me->assets, t);
-    // One exception to the above: the colorgroup and basematerials colors are decoded while the resources
-    // are parsed in this callback, not in cookMySop, so read the sRGB toggle fresh here rather than
-    // relying on whatever the last cook saw.
+    // Read the parameters fresh. cookMySop sets them too, so they match the GUI even when Read isn't pressed,
+    // but a parameter changed since the last cook (say, Only Geometry just turned on) isn't seen until the
+    // node cooks again, and this callback parses the file (colors, textures, multiproperties) before that.
+    me->debug = me->DEBUG(t);
+    me->flip = me->FLIP(t);
+    me->overrideShader = me->OVERRIDE(t);
+    me->build = me->BUILD(t);
+    me->geoOnly = me->GEO(t);
+    me->timer = me->TIMER(t);
+    me->FILENAME(me->filename, t);
+    me->ASSETS(me->assets, t);
     me->convertSRGB = me->CONVERTSRGB(t);
     me->start = generateTimestamp();
     me->t = t;
@@ -2097,9 +2145,37 @@ SOP_Read3mf::read(void *data, int index, fpreal t, const PRM_Template *tplate) {
         return me->error();
     }
 
-    // We append the node name to make sure the folder name is unique inside this session.
-    me->extractFolder = me->assets + "/" + me->getName().buffer();
+    // Each Read unpacks into a fresh folder of its own, <assets>/<node name>/read-<milliseconds>, so we never
+    // overwrite a file from an earlier read. A renderer showing that earlier read may still have its textures
+    // open (on Windows that blocks overwriting them), and renderers cache textures by file name, so a reused
+    // name could also show a stale image. The node name keeps different Read3mf nodes apart.
+    std::string nodeFolder = me->assets + "/" + me->getName().buffer();
+    long long readStamp = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+    std::string readFolderName = "read-" + std::to_string(readStamp);
+    me->extractFolder = nodeFolder + "/" + readFolderName;
     LOG_DEBUG(me->debug, "Extract folder is " << me->extractFolder);
+
+    // Clear out what earlier reads left in this node's folder (including files from versions that unpacked
+    // straight into it). Anything a renderer still has open can't be deleted yet; it's left for a later read.
+    {
+        std::error_code ec;
+        std::vector<std::filesystem::path> leftovers;
+        if (std::filesystem::is_directory(nodeFolder, ec)) {
+            for (const auto &entry : std::filesystem::directory_iterator(nodeFolder, ec)) {
+                if (entry.path().filename() != readFolderName) {
+                    leftovers.push_back(entry.path());
+                }
+            }
+        }
+        for (const auto &leftover : leftovers) {
+            std::filesystem::remove_all(leftover, ec);
+            if (ec) {
+                LOG_DEBUG(me->debug, "Couldn't remove all of " << leftover.string() << " yet: " << ec.message());
+                ec.clear();
+            }
+        }
+    }
 
      // Get 3mf file to import
     if (me->filename.empty()) {
@@ -2547,6 +2623,68 @@ SOP_Read3mf::parseModel(std::string the_model) {
 //
 // Parse the resources part of the tree and set up Houdini data structures.
 //
+//
+// Whether the second layer of a multiproperties group can be partly transparent anywhere the group is used.
+// For a colorgroup or base material layer, checks the alpha of each entry the group's <m:multi> elements pick
+// (a missing pindex means 0). For a texture layer, checks whether its image has any pixel that isn't fully
+// opaque. Anything else (or anything we can't check) counts as possibly transparent.
+//
+bool
+SOP_Read3mf::secondLayerIsPartlyTransparent(tinyxml2::XMLElement* multiproperties, int secondPid) {
+    const std::vector<PixelColor>* colors = nullptr;
+    auto itc = this->colorDict.find(secondPid);
+    if (itc != this->colorDict.end()) {
+        colors = &itc->second;
+    } else {
+        auto itb = this->basematDict.find(secondPid);
+        if (itb != this->basematDict.end()) {
+            colors = &itb->second;
+        }
+    }
+    if (colors) {
+        for (auto* multi = multiproperties->FirstChildElement("m:multi"); multi;
+             multi = multi->NextSiblingElement("m:multi")) {
+            int index = 0; // pindices shorter than pids are padded with 0
+            const char* pindicesC = multi->Attribute("pindices");
+            if (pindicesC) {
+                std::istringstream pindices(pindicesC);
+                int first = 0;
+                int second = 0;
+                if ((pindices >> first) && (pindices >> second)) {
+                    index = second;
+                }
+            }
+            if (index < 0 || index >= (int)colors->size() || (*colors)[index].a < 1.0f) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    auto itt = this->texture2dgroupDict.find(secondPid);
+    if (itt != this->texture2dgroupDict.end()) {
+        std::string texturePath = itt->second.texturePath.toStdString();
+        int width, height, channels;
+        unsigned char* data = stbi_load(texturePath.c_str(), &width, &height, &channels, 4);
+        if (!data) {
+            return true;
+        }
+        bool partlyTransparent = false;
+        size_t pixelCount = (size_t)width * height;
+        for (size_t p = 0; p < pixelCount; ++p) {
+            if (data[p * 4 + 3] < 255) {
+                partlyTransparent = true;
+                break;
+            }
+        }
+        stbi_image_free(data);
+        return partlyTransparent;
+    }
+
+    return true;
+}
+
+
 SOP_Read3mf::ErrorCode
 SOP_Read3mf::handleResourcesForSubnet(XMLElement* element) {
 
@@ -2571,7 +2709,8 @@ SOP_Read3mf::handleResourcesForSubnet(XMLElement* element) {
                 err = handleBasematerials(descendant);
             } else if (tag_name == "m:multiproperties") {
                 // blendmethods gives each layer after the first a blend of "mix" (the default) or "multiply". We
-                // currently blend every layer as mix, so say so if a group asks for multiply.
+                // don't yet support multiply, and blending it as mix gives clearly wrong colors, so stop. (We only
+                // get here with Only Geometry off; with it on, colors aren't read and the shape imports fine.)
                 const char* blendC = descendant->Attribute("blendmethods");
                 if (blendC) {
                     std::istringstream blends(blendC);
@@ -2579,11 +2718,32 @@ SOP_Read3mf::handleResourcesForSubnet(XMLElement* element) {
                     while (blends >> blend) {
                         if (blend == "multiply") {
                             const char* groupC = descendant->Attribute("id");
-                            this->addReadWarning(std::string("Multiproperties group ") + (groupC ? groupC : "(no id)")
-                                + " uses the multiply blend method, which we do not yet handle. "
-                                "It is blended as mix, so results might be suspect.");
-                            break;
+                            std::string message = std::string("Error: Multiproperties group ")
+                                + (groupC ? groupC : "(no id)") + " uses the multiply blend method, which Read3mf "
+                                "does not yet support. Turn on Only Geometry to import the shape without colors.";
+                            std::cerr << message << std::endl;
+                            this->addError(SOP_MESSAGE, message.c_str());
+                            return ErrorCode::OTHER;
                         }
+                    }
+                }
+                // When the first layer is a base material, the 3mf spec recommends blending the layers above it
+                // on their own (starting from layer 2's own alpha) and laying the result over the material. We
+                // blend bottom-up, which gives the same colors only where layer 2 is fully opaque. (Base materials
+                // come before the multiproperties that use them, so basematDict already knows this one.)
+                const char* pidsC = descendant->Attribute("pids");
+                if (pidsC) {
+                    std::istringstream pidList(pidsC);
+                    int firstPid = -1;
+                    int secondPid = -1;
+                    if ((pidList >> firstPid) && (pidList >> secondPid)
+                        && this->basematDict.find(firstPid) != this->basematDict.end()
+                        && this->secondLayerIsPartlyTransparent(descendant, secondPid)) {
+                        const char* groupC = descendant->Attribute("id");
+                        this->addReadWarning(std::string("Multiproperties group ") + (groupC ? groupC : "(no id)")
+                            + " has a base material as its first layer and a partly transparent second layer. Read3mf "
+                            "blends the layers in order, not as the 3mf spec recommends for this case, so some colors "
+                            "may differ from what the file intends.");
                     }
                 }
                 err = handleMultiproperties(descendant);
@@ -2864,9 +3024,8 @@ SOP_Read3mf::handleTexture2d(tinyxml2::XMLElement* element) {
             // Note: For addError, we can't easily use << unless your macro supports it, 
             // so I'm using a temporary stringstream here to keep the code clean.
             std::stringstream ss;
-            ss << "Warning: Type of requested tiling (" << tileUC << ") in u is unknown. Will default to wrap.";
-            addError(UT_ERROR_FATAL, ss.str().c_str());
-            std::cerr << ss.str() << std::endl;
+            ss << "Type of requested tiling (" << tileUC << ") in u is unknown. Will default to wrap.";
+            this->addReadWarning(ss.str());
         }
     }
 
@@ -2886,14 +3045,26 @@ SOP_Read3mf::handleTexture2d(tinyxml2::XMLElement* element) {
             tilestylev = Tiling::CLAMP;
         } else {
             std::stringstream ss;
-            ss << "Warning: Type of requested tiling (" << tileVC << ") in v is unknown. Will default to wrap.";
-            addError(UT_ERROR_FATAL, ss.str().c_str());
-            std::cerr << ss.str() << std::endl;
+            ss << "Type of requested tiling (" << tileVC << ") in v is unknown. Will default to wrap.";
+            this->addReadWarning(ss.str());
         }
     }
 
-    // Deal with tiling.
     path = this->extractFolder + path;
+
+    // Give grayscale textures RGB or RGBA copies, which every renderer reads the same way. Everything after
+    // this (tiling copies, shaders, sampling for Cd) uses the copy.
+    std::string expandedPath;
+    if (!expandGrayTexture(path, expandedPath, this->debug)) {
+        std::string message = "Error: Couldn't convert grayscale texture " + path + " to color. The file may be "
+            "open in another program, such as a render view showing an earlier read. Close it and press Read again.";
+        std::cerr << message << std::endl;
+        this->addError(SOP_MESSAGE, message.c_str());
+        return ErrorCode::OTHER;
+    }
+    path = expandedPath;
+
+    // Deal with tiling.
     std::string usePath;
     if (handleTiling(id, path, tilestyleu, tilestylev, usePath) != ErrorCode::SUCCESS) {
         std::cerr << "Error: Unable to handle tiling of texture " << usePath << std::endl;
@@ -3077,24 +3248,41 @@ SOP_Read3mf::handleTexture2dgroup(tinyxml2::XMLElement* element) {
     LOG_DEBUG(false, "set texture2dgroupDict of id " << id << " to " << textureFile);
     texture2dgroupDict[id].originalTexId = texid;
 
-    if (tilestyleU == Tiling::NONE || tilestyleV == Tiling::NONE || tilestyleU == Tiling::CLAMP || tilestyleV == Tiling::CLAMP) {
+    // Offset and scale for this group's coordinates on a clamp or none axis, worked out by clampTexture().
+    // They belong to this group alone: another group using the same texture can reach a different range.
+    std::array<float, 2> clampScale = {1.0f, 1.0f};
+    std::array<float, 2> clampOffset = {0.0f, 0.0f};
+    bool clampU = (tilestyleU == Tiling::NONE || tilestyleU == Tiling::CLAMP);
+    bool clampV = (tilestyleV == Tiling::NONE || tilestyleV == Tiling::CLAMP);
+
+    if (clampU || clampV) {
         // With a clamp or none texture we have to make a new texture file with clamping.
-        if (clampTexture(texid, id, textureFile, tilestyleU == Tiling::NONE || tilestyleU == Tiling::CLAMP,
-            tilestyleV == Tiling::NONE || tilestyleV == Tiling::CLAMP, maxU, maxV, minU, minV, textureFile)
+        std::string noneFile;
+        if (clampTexture(texid, id, textureFile, clampU, clampV, maxU, maxV, minU, minV, textureFile,
+            clampScale, clampOffset, tilestyleU == Tiling::NONE, tilestyleV == Tiling::NONE, noneFile)
             != ErrorCode::SUCCESS) {
             std::cerr << "Error: Unable to redo uv coordinate range information." << std::endl;
             return ErrorCode::OTHER;
         }
         texture2dgroupDict[id].texturePath = textureFile; // overwrite with name of new texture file from clamping
+        texture2dgroupDict[id].noneTexturePath = noneFile; // empty unless tilestyle "none" needed one
         //texture2dgroupDict[id].texturePath.harden(); // Changed to UT_StringHolder so no need to harden
         LOG_DEBUG(false, "Returned from clamp and set texture2dgroupDict of  id " << id << " to " << textureFile);
     }
 
-       // The scaling might have changed after call to clampTexture, so we redo uv coordinates
-    choice = textureModifyUVsDict[texid];
-    scaling = choice.scaling;
-    LOG_DEBUG(false, "We now have revised transform info " << choice.scaling[0] << ", "
-        << choice.scaling[1] << " for texid " << texid);
+    // The texture's own scaling (from mirroring, say) applies to wrap and mirror axes. A clamp or none axis
+    // uses this group's offset and scale from clampTexture() instead.
+    std::array<float, 2> offset = {0.0f, 0.0f};
+    if (clampU) {
+        scaling[0] = clampScale[0];
+        offset[0] = clampOffset[0];
+    }
+    if (clampV) {
+        scaling[1] = clampScale[1];
+        offset[1] = clampOffset[1];
+    }
+    LOG_DEBUG(false, "Coordinate transform: scale " << scaling[0] << ", " << scaling[1] << " offset " << offset[0]
+        << ", " << offset[1] << " for group " << id);
 
     // iterate through all siblings of the first child
     //while (child) {
@@ -3110,16 +3298,8 @@ SOP_Read3mf::handleTexture2dgroup(tinyxml2::XMLElement* element) {
             LOG_DEBUG(false, "we're going to modify using scale " << scaling[0] << " " << scaling[1]);
             LOG_DEBUG(false, "starting with u " << u << " and v " << v);
             // Modify uvs based on transform info
-            if (tilestyleU == Tiling::NONE) {
-                u = (u - minU) * scaling[0];
-            } else {
-                u = u * scaling[0];
-            }
-            if (tilestyleV == Tiling::NONE) {
-                v = (v - minV) * scaling[1];
-            } else {
-                v = v * scaling[1];
-            }
+            u = (u - offset[0]) * scaling[0];
+            v = (v - offset[1]) * scaling[1];
             LOG_DEBUG(false, "and now we have u " << u << " and v " << v);
 
             arrayOfCoords.push_back({u, v});
@@ -3144,7 +3324,8 @@ SOP_Read3mf::handleTexture2dgroup(tinyxml2::XMLElement* element) {
 //
 SOP_Read3mf::ErrorCode
 SOP_Read3mf::clampTexture(const int texid, const int groupId, std::string texturePathFs, bool redoU, bool redoV, float maxU, float maxV,
-    float minU, float minV, std::string& usePath) {                
+    float minU, float minV, std::string& usePath, std::array<float, 2>& scaleOut, std::array<float, 2>& offsetOut,
+    bool noneU, bool noneV, std::string& noneUsePath) {                
 
     LOG_DEBUG(this->debug, "Entering clampTexture.");
     LOG_DEBUG(false, "Came in with maxU " << maxU << " maxV " << maxV);
@@ -3175,21 +3356,12 @@ SOP_Read3mf::clampTexture(const int texid, const int groupId, std::string textur
     int pixelBytes = numChannels;
     int originalRowStride = width * pixelBytes;
 
-    std::array<float, 2> currentScaling = textureModifyUVsDict[texid].scaling;
-
-    // How much streaking do we need to do on the sides?
+    // How much streaking do we need to do on the sides? (A clamp or none axis is never also mirrored, so its
+    // coordinates are used as they are.)
     int extendRight = 0;
     int extendLeft = 0;
     int extendUp = 0;
     int extendDown = 0;
-
-    // We might already have set scaling when dealing with mirroring.
-    maxU *= currentScaling[0];
-    minU *= currentScaling[0];
-    maxV *= currentScaling[1];
-    minV *= currentScaling[1];
-    LOG_DEBUG(false, "We've reset maxU " << maxU << " maxV " << maxV);
-    LOG_DEBUG(false, "We've reset minU " << minU << " minV " << minV);
 
     if (maxU > 1 && redoU) {
         extendRight = ceil(width * (maxU - 1.0));
@@ -3206,6 +3378,70 @@ SOP_Read3mf::clampTexture(const int texid, const int groupId, std::string textur
     LOG_DEBUG(false, "We have maxU " << maxU << " minU " << minU << " maxV " << maxV << " minV " << minV);
     LOG_DEBUG(false, "We have extendLeft " << extendLeft << " extendRight " << extendRight << " extendDown "
         << extendDown << " extendUp " <<  extendUp);
+
+    // The copy covers original coordinates from lo to hi on each clamped axis: the image's own 0 to 1 plus the
+    // streaks, measured in whole pixels (the streak widths were rounded up). So a coordinate u lands at
+    // (u - lo) / (hi - lo) on the copy. Hand that back as an offset (lo) and a scale (1 / (hi - lo)); on an axis
+    // with no streaks that's offset 0 and scale 1, i.e. the coordinates are used unchanged.
+    scaleOut = {1.0f, 1.0f};
+    offsetOut = {0.0f, 0.0f};
+    if (redoU) {
+        float lo = -static_cast<float>(extendLeft) / width;
+        float hi = 1.0f + static_cast<float>(extendRight) / width;
+        scaleOut[0] = 1.0f / (hi - lo);
+        offsetOut[0] = lo;
+    }
+    if (redoV) {
+        float lo = -static_cast<float>(extendDown) / height;
+        float hi = 1.0f + static_cast<float>(extendUp) / height;
+        scaleOut[1] = 1.0f / (hi - lo);
+        offsetOut[1] = lo;
+    }
+    LOG_DEBUG(false, "Clamp transform: scale " << scaleOut[0] << ", " << scaleOut[1] << " offset " << offsetOut[0]
+        << ", " << offsetOut[1]);
+
+    // If no coordinate reaches outside the image, the clamped copy would be identical to the original, so
+    // use the original and don't write anything.
+    if (extendLeft == 0 && extendRight == 0 && extendUp == 0 && extendDown == 0) {
+        usePath = texturePathFs;
+        stbi_image_free(originalData);
+        LOG_DEBUG(this->debug, "No clamped copy needed for " << texturePathFs << "; exiting clampTexture.");
+        return ErrorCode::SUCCESS;
+    }
+
+    // For tilestyle "none", also write a copy whose streaks on the "none" axes are fully transparent, for use
+    // where the group is a multiproperties layer above the first. (The streaked copy above is still right for
+    // every other use, where "none" behaves as "clamp".) Always RGBA png, so it can hold the alpha.
+    noneUsePath.clear();
+    bool noneStreaks = (noneU && (extendLeft > 0 || extendRight > 0)) || (noneV && (extendUp > 0 || extendDown > 0));
+    auto writeNoneCopy = [&](const unsigned char* image, int finalWidth, int finalHeight) -> bool {
+        std::vector<unsigned char> rgba((size_t)finalWidth * finalHeight * 4);
+        for (int y = 0; y < finalHeight; ++y) {
+            bool streakV = (y < extendUp || y >= extendUp + height);
+            for (int x = 0; x < finalWidth; ++x) {
+                bool streakU = (x < extendLeft || x >= extendLeft + width);
+                const unsigned char* src = image + ((size_t)y * finalWidth + x) * numChannels;
+                unsigned char* dst = rgba.data() + ((size_t)y * finalWidth + x) * 4;
+                if (numChannels >= 3) {
+                    dst[0] = src[0]; dst[1] = src[1]; dst[2] = src[2];
+                } else {
+                    dst[0] = dst[1] = dst[2] = src[0];
+                }
+                dst[3] = (numChannels == 4) ? src[3] : (numChannels == 2 ? src[1] : 255);
+                if ((noneU && streakU) || (noneV && streakV)) {
+                    dst[3] = 0;
+                }
+            }
+        }
+        std::string nonePath = dir + "/" + stem + "-none" + std::to_string(groupId) + ".png";
+        if (!stbi_write_png(nonePath.c_str(), finalWidth, finalHeight, 4, rgba.data(), finalWidth * 4)) {
+            std::cerr << "Error: couldn't write a new version of texture " << stem << suffix << " to: " << nonePath
+                << std::endl;
+            return false;
+        }
+        noneUsePath = nonePath;
+        return true;
+    };
 
     int success;
 
@@ -3274,8 +3510,9 @@ SOP_Read3mf::clampTexture(const int texid, const int groupId, std::string textur
 
         success = writeNewTexture(dir, stem, suffix, "-clampedUV" + std::to_string(groupId), finalWidth, finalHeight, numChannels,
             newImagePtr, finalRowStride, usePath, this->debug);
-        // Adjust both U and V scaling
-        textureModifyUVsDict[texid].scaling = {1/(maxU-minU ), 1/(maxV-minV)};
+        if (success && noneStreaks) {
+            success = writeNoneCopy(newImagePtr, finalWidth, finalHeight);
+        }
 
     // For clamping in the U direction, we only have to worry about streaking in the left or right directions.
     } else if (redoU) {
@@ -3330,8 +3567,9 @@ SOP_Read3mf::clampTexture(const int texid, const int groupId, std::string textur
         
         success = writeNewTexture(dir, stem, suffix, "-clampedU" + std::to_string(groupId), finalWidth, finalHeight, numChannels,
             newImagePtr, finalRowStride, usePath, this->debug);
-        textureModifyUVsDict[texid].scaling = {1/(maxU-minU), currentScaling[1]}; // leave tiling style entries alone
-        LOG_DEBUG(false, "we have scaling now of " << 1/maxU << " " << 1.0 << " for texid " << texid);
+        if (success && noneStreaks) {
+            success = writeNoneCopy(newImagePtr, finalWidth, finalHeight);
+        }
 
     // For clamping in the V direction, we only have to worry about streaking in the up or down directions.
     // This is easier than in U, since while we're in a streak section, the whole row is a streak and not
@@ -3345,9 +3583,8 @@ SOP_Read3mf::clampTexture(const int texid, const int groupId, std::string textur
         std::vector<unsigned char> newData(finalWidth * finalHeight * numChannels);
         unsigned char* newImagePtr = newData.data();
 
-        // Pixel data for the upper-most or lower-most row that will be streaked
-        //unsigned char edgePixelData[originalRowStride];
-        std::vector<unsigned char> edgePixelData(pixelBytes);
+        // Pixel data for the upper-most or lower-most row that will be streaked (a whole row, not one pixel)
+        std::vector<unsigned char> edgePixelData(originalRowStride);
 
         // Start with upper most
         std::memcpy(edgePixelData.data(), originalData, originalRowStride);
@@ -3359,25 +3596,34 @@ SOP_Read3mf::clampTexture(const int texid, const int groupId, std::string textur
         // Copy the full original image (width x height) to the next part of the new buffer.
         std::memcpy(newImagePtr + extendUp * originalRowStride, originalData, width * height * numChannels);
         
-        // Now get pixel data for the bottom streak and copy it
+        // Now get pixel data for the bottom streak and copy it, one row at a time below the original image
         std::memcpy(edgePixelData.data(), originalData + (height - 1) * originalRowStride, originalRowStride);
         for (int y = 0; y < extendDown; ++y) {
-            std::memcpy(newImagePtr + extendUp * originalRowStride + width * height * numChannels,
-                originalData + y * originalRowStride, originalRowStride);
+            std::memcpy(newImagePtr + (extendUp + height + y) * originalRowStride,
+                edgePixelData.data(), originalRowStride);
         }
 
         success = writeNewTexture(dir, stem, suffix, "-clampedV" + std::to_string(groupId), finalWidth, finalHeight, numChannels,
             newImagePtr, finalRowStride, usePath, this->debug);
-        textureModifyUVsDict[texid].scaling = {currentScaling[0], 1/(maxV-minV)}; // leave tiling style entries alone
-        LOG_DEBUG(false, "we have scaling now of " << 1.0 << " " << 1/maxV << " for texid " << texid);
+        if (success && noneStreaks) {
+            success = writeNoneCopy(newImagePtr, finalWidth, finalHeight);
+        }
     }
 
     // Free the original image memory
     stbi_image_free(originalData);
     // The new buffer doesn't need to be freed since it is a std::vector
 
+    // If the clamped copy couldn't be written, stop: some coordinates reach outside the image, and without
+    // the copy those areas would come out wrong. On Windows this is often because another program, such as a
+    // render view showing an earlier read, still has the file open.
     LOG_DEBUG(this->debug, "Exiting clampTexture.");
     if (!success) {
+        std::string message = "Error: Couldn't write the clamped copy of texture " + stem + suffix
+            + " (in " + dir + "). The file may be open in another program, such as a render view showing an "
+            "earlier read. Close it and press Read again.";
+        std::cerr << message << std::endl;
+        this->addError(SOP_MESSAGE, message.c_str());
         return ErrorCode::OTHER;
     }
     return ErrorCode::SUCCESS;
@@ -3684,17 +3930,11 @@ SOP_Read3mf::handleMultiproperties(XMLElement* element) {
             if (baseColorIdx >= 0) {
                 shaderNode->setInput(baseColorIdx, bindNodeColor, 0);
             }
-            // The 3mf blend is accumulated = layer * alpha + accumulated * (1 - alpha). On the first layer
-            // there's nothing beneath, so the alpha is the surface's own opacity. On a later layer it is how
-            // much this layer covers the ones beneath, so it drives the layermix instead, and this shader
-            // stays fully opaque. (Putting it on opac here as well made the layer count for too much.)
-            if (first) {
-                int alphaIdx = shaderNode->getInputFromName("opac");
-                LOG_DEBUG(this->debug, "got alphaIdx as " << alphaIdx);
-                if (alphaIdx >= 0) {
-                    shaderNode->setInput(alphaIdx, bindNodeAlpha, 0);
-                }
-            } else {
+            // The 3mf blend is accumulated = layer * alpha + accumulated * (1 - alpha), with the first layer
+            // assumed fully opaque whatever its own alpha (Materials spec). So the first layer's alpha is
+            // ignored, and on a later layer the alpha drives the layermix that puts it over the ones beneath.
+            // Every layer shader stays fully opaque.
+            if (!first) {
                 layerAlphaNode = bindNodeAlpha;
             }
             LOG_DEBUG(this->debug, "finished color layer");
@@ -4155,6 +4395,10 @@ SOP_Read3mf::colorFromMulti(const MultiData &multiData, int pindex, PixelColor &
         } else if (multiTypes[i] == MultiType::TEXTURE) {
             LOG_DEBUG(this->debug, "For group " << pid << " it's a texture");
             TextureGroupData textureInfo = texture2dgroupDict[pid];
+            // Above the first layer, tilestyle "none" is transparent outside the image, so sample that copy.
+            if (i > 0 && textureInfo.noneTexturePath.isstring()) {
+                textureInfo.texturePath = textureInfo.noneTexturePath;
+            }
             PixelColor color;
             UT_StringHolder texturePath = textureInfo.texturePath;
             std::vector<UT_Vector2> coords = textureInfo.coords;
@@ -4178,7 +4422,9 @@ SOP_Read3mf::colorFromMulti(const MultiData &multiData, int pindex, PixelColor &
     if (colorsToBlend.size() < 2) {
         std::cerr << "Error: there weren't enough layers of colors to blend them." << std::endl;
     }
+    // The 3mf Materials spec assumes the first layer is fully opaque, whatever its own alpha says.
     returnColor = colorsToBlend[0];
+    returnColor.a = 1.0f;
     for (size_t i = 1; i < colorsToBlend.size(); ++i) {
         LOG_DEBUG(this->debug, "    (" << colorsToBlend[i] << ")\n");
         //returnColor = blendColors(returnColor, colorsToBlend[i]);
@@ -5274,13 +5520,20 @@ SOP_Read3mf::handleTriangle(XMLElement* element, int& numTriangles, const int ob
                 LOG_DEBUG(this->debug, "Back from setTextureAttrs in multi section");
                 // Get the path for the texture this multi layer uses
                 UT_StringHolder multiTexturePath = this->texture2dgroupDict[(*multiPids)[i]].texturePath;
+                // Above the first layer, tilestyle "none" is transparent outside the image, so use that copy.
+                if (i > 0 && this->texture2dgroupDict[(*multiPids)[i]].noneTexturePath.isstring()) {
+                    multiTexturePath = this->texture2dgroupDict[(*multiPids)[i]].noneTexturePath;
+                }
                 triangleState.texturePath = &multiTexturePath;
 
                 if (opaque) {
                     if (triangleState.texturePath) {
                         std::string opaqueTexturePath;
                         LOG_DEBUG(this->debug, "Calling makeOpaqueTexture with triangleState " << triangleState);
-                        if (makeOpaqueTexture((*multiPids)[pid], triangleState.texturePath ? triangleState.texturePath->buffer() : "", opaqueTexturePath)
+                        // The opaque copy is cached per texture group, so key it by this layer's texture group
+                        // ((*multiPids)[i]). (Indexing with the triangle's pid read past the end of the layer list,
+                        // so two multiproperties groups could end up sharing one base texture.)
+                        if (makeOpaqueTexture((*multiPids)[i], triangleState.texturePath ? triangleState.texturePath->buffer() : "", opaqueTexturePath)
                             != ErrorCode::SUCCESS) {
                             std::cerr << "Error: Unable to make opaque texture" << std::endl;
                             return ErrorCode::OTHER;

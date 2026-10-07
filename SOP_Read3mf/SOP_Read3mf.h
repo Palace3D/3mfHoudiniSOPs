@@ -326,6 +326,11 @@ namespace HDK_Sample {
         struct TextureGroupData {
             UT_StringHolder texturePath;
             UT_StringHolder opaquePath;
+            // For tilestyle "none" with coordinates outside the image: a copy whose streaks are fully transparent,
+            // used only where the group is a multiproperties layer above the first (where "none" means the layers
+            // beneath show through). Everywhere else "none" behaves as "clamp" and uses texturePath. Empty if
+            // there's no such copy.
+            UT_StringHolder noneTexturePath;
             std::vector<UT_Vector2> coords;
             int originalTexId; // Useful for debugging, but not kept up-to-date in TriangleState!
 
@@ -469,6 +474,8 @@ namespace HDK_Sample {
         // multiply blend method). Reset in clearData(), and put on the node during each cook.
         std::vector<std::string>    readWarnings;
         void            addReadWarning(const std::string &message);
+        // Whether a multiproperties group's second layer can be partly transparent (for the base-material warning)
+        bool            secondLayerIsPartlyTransparent(tinyxml2::XMLElement* multiproperties, int secondPid);
         void            warnReadWarnings();
 
         // XXXXX Flags to show which kinds of resources the model uses
@@ -536,7 +543,9 @@ namespace HDK_Sample {
         SOP_Read3mf::ErrorCode      handleTexture2d(tinyxml2::XMLElement* element);
         SOP_Read3mf::ErrorCode      handleTexture2dgroup(tinyxml2::XMLElement* element);
         SOP_Read3mf::ErrorCode      clampTexture(const int texid, const int groupId, std::string texturePathFs,
-            bool redoU, bool redoV, float maxU, float maxV, float minU, float minV, std::string& usePath);  
+            bool redoU, bool redoV, float maxU, float maxV, float minU, float minV, std::string& usePath,
+            std::array<float, 2>& scaleOut, std::array<float, 2>& offsetOut,
+            bool noneU, bool noneV, std::string& noneUsePath);  
         SOP_Read3mf::ErrorCode      getTexCoord(tinyxml2::XMLElement* element, float& u, float &v);
         SOP_Read3mf::ErrorCode      handleTiling(int id, std::string path, Tiling tilestyleU, Tiling tilestyleV,
             std::string& usePath);
