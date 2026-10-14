@@ -31,6 +31,8 @@ packaging/*
 !packaging/build_release.bat
 !packaging/test_package.bat
 !packaging/check_package.py
+!packaging/triplets/
+!packaging/triplets/x64-windows-static-md-v1435.cmake
 
 # build-20.5/, build-22.0/ and dist/ (release builds and zips) stay ignored by the
 # first rule. Release zips go on GitHub Releases.

@@ -19,21 +19,34 @@ rem  never goes out missing one of its Houdini versions.
 rem ===========================================================================
 
 rem ---- Settings for this machine ---------------------------------------------
+rem For each Houdini version:
+rem   HOUDINI_X_Y  its install folder
+rem   TOOLSET_X_Y  the MSVC toolset to build with, as v143,version=14.NN, or
+rem                empty for Visual Studio's default compiler. It must be in
+rem                that Houdini's accepted compiler range.
+rem   TRIPLET_X_Y  the vcpkg triplet for minizip and zlib. Static libraries
+rem                must be built by the same compiler as the plugin, or an
+rem                older one, so a version with its own TOOLSET also needs a
+rem                matching triplet; those live in packaging\triplets.
+
+rem Houdini 22.0: accepts compilers 19.00 to 19.59. Uses Visual Studio's
+rem default compiler.
 set "HOUDINI_22_0=C:\Program Files\Side Effects Software\Houdini 22.0.429"
 set "TOOLSET_22_0="
+set "TRIPLET_22_0=x64-windows-static-md"
 
-rem Houdini 20.5: fill these in once it's installed. TOOLSET picks an MSVC
-rem toolset inside 20.5's range (hcustom --output_compiler_range), in the form
-rem v143,version=14.NN
-set "HOUDINI_20_5="
-set "TOOLSET_20_5="
+rem Houdini 20.5: built by SideFX with cl 19.35, so we use build tools 14.35
+rem (Visual Studio Installer: "MSVC v143 - VS 2022 C++ x64/x86 build tools
+rem (v14.35-17.5)").
+set "HOUDINI_20_5=C:\Program Files\Side Effects Software\Houdini 20.5.684"
+set "TOOLSET_20_5=v143,version=14.35"
+set "TRIPLET_20_5=x64-windows-static-md-v1435"
 
 rem vcpkg folder (the one containing vcpkg.exe). If left empty, the
 rem VCPKG_ROOT environment variable is used.
 set "VCPKG_DIR=C:\dev\vcpkg"
 rem ----------------------------------------------------------------------------
 
-set "TRIPLET=x64-windows-static-md"
 set "RELVER=%~1"
 if "%RELVER%"=="" set "RELVER=dev"
 
@@ -56,20 +69,16 @@ pushd "%~dp0.."
 set "ROOT=%CD%"
 set "STAGE=%ROOT%\dist\stage"
 set "PKG=%STAGE%\palace3d_3mf"
+set "TRIPLETS=%ROOT%\packaging\triplets"
 set "MISSING="
-
-echo.
-echo === Making sure vcpkg has static minizip and zlib [%TRIPLET%] ===
-"%VCPKG_DIR%\vcpkg.exe" install minizip:%TRIPLET%
-if errorlevel 1 goto :fail
 
 if exist "%STAGE%" rmdir /s /q "%STAGE%"
 mkdir "%PKG%\help\nodes\sop"
 if errorlevel 1 goto :fail
 
-call :build_version 22.0 "%HOUDINI_22_0%" "%TOOLSET_22_0%"
+call :build_version 22.0 "%HOUDINI_22_0%" "%TOOLSET_22_0%" "%TRIPLET_22_0%"
 if errorlevel 1 goto :fail
-call :build_version 20.5 "%HOUDINI_20_5%" "%TOOLSET_20_5%"
+call :build_version 20.5 "%HOUDINI_20_5%" "%TOOLSET_20_5%" "%TRIPLET_20_5%"
 if errorlevel 1 goto :fail
 
 echo.
@@ -109,12 +118,13 @@ exit /b 1
 
 
 rem ---------------------------------------------------------------------------
-rem  :build_version <X.Y> "<Houdini install folder>" "<toolset or empty>"
+rem  :build_version <X.Y> "<Houdini install folder>" "<toolset or empty>" "<triplet>"
 rem ---------------------------------------------------------------------------
 :build_version
 set "HVER=%~1"
 set "HPATH=%~2"
 set "HTOOLSET=%~3"
+set "TRIPLET=%~4"
 if "%HPATH%"=="" (
     echo.
     echo === Skipping Houdini %HVER%: no install path set ===
@@ -130,6 +140,11 @@ set "DSO=%PKG%\houdini%HVER%\dso"
 set "BUILDDIR=%ROOT%\build-%HVER%"
 set "TOOLSET_ARG="
 if not "%HTOOLSET%"=="" set "TOOLSET_ARG=-T %HTOOLSET%"
+
+echo.
+echo === Houdini %HVER%: making sure vcpkg has static minizip and zlib [%TRIPLET%] ===
+"%VCPKG_DIR%\vcpkg.exe" install minizip:%TRIPLET% "--overlay-triplets=%TRIPLETS%"
+if errorlevel 1 exit /b 1
 
 rem A fresh build folder each time: CMake remembers the compiler it chose first.
 if exist "%BUILDDIR%" rmdir /s /q "%BUILDDIR%"
@@ -150,7 +165,8 @@ exit /b 0
 
 
 rem ---------------------------------------------------------------------------
-rem  :build_sop <SOP folder name>   (uses HVER, HFS, DSO, BUILDDIR, TOOLSET_ARG)
+rem  :build_sop <SOP folder name>
+rem  Uses HVER, HFS, DSO, BUILDDIR, TOOLSET_ARG and TRIPLET.
 rem ---------------------------------------------------------------------------
 :build_sop
 echo.

@@ -630,6 +630,12 @@ SOP_Save3mf::cookMySop(OP_Context &context)
 // actually has to do something (i.e. save the geometry). All the work
 // is essentially done by cookMySop.
 //
+// forceRecook() only marks the node as needing to cook; Houdini cooks it only when something
+// asks for its geometry (the display or render flag, or a displayed node downstream). So we
+// also cook it here ourselves. Otherwise pressing Save does nothing until the display flag is
+// moved onto (or below) this node. Cooking here clears the dirty state, so a later cook caused
+// by the flags doesn't save a second time; and cookMySop clears saveGeometry when it saves.
+//
 /*static*/ int
 SOP_Save3mf::save(void *data, int index, fpreal t, const PRM_Template *tplate)
 {
@@ -644,8 +650,12 @@ SOP_Save3mf::save(void *data, int index, fpreal t, const PRM_Template *tplate)
     LOG_DEBUG(this_node->debug, "\nEntering save");
 
     this_node->saveGeometry = true; // So cookMySop knows to save the geometry.
-    this_node->forceRecook(); // Cause node to cook again
+    this_node->forceRecook(); // Mark the node as needing to cook
     LOG_DEBUG(this_node->debug, "Save geometry is " + std::to_string(this_node->saveGeometry));
+
+    // Cook now, whatever the display and render flags are, so the file is written.
+    OP_Context context(t);
+    this_node->getCookedGeoHandle(context);
 
     LOG_DEBUG(this_node->debug, "Exiting save");
 

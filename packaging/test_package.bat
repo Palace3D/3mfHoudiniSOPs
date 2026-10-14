@@ -17,7 +17,7 @@ rem ===========================================================================
 
 rem ---- Settings for this machine (same paths as build_release.bat) ----------
 set "HOUDINI_22_0=C:\Program Files\Side Effects Software\Houdini 22.0.429"
-set "HOUDINI_20_5="
+set "HOUDINI_20_5=C:\Program Files\Side Effects Software\Houdini 20.5.684"
 set "TESTROOT=C:\houdini-package-test"
 rem ----------------------------------------------------------------------------
 

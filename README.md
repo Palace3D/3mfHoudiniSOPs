@@ -3,17 +3,94 @@
 SOP nodes in C++ for importing and exporting 3mf files. These
 supersede earlier Python versions.
 
-Builds and runs on both Linux and Windows.
+Builds and runs on both Linux and Windows. A prebuilt package is
+available for Windows, for Houdini 20.5 and 22.0.
 
 ## Installation
 
-These SOPs are built from source against your own Houdini install,
-using the HDK (Houdini Development Kit) that comes with every copy of
-Houdini, in `$HFS/toolkit/`. They have been built and tested with
-**Houdini 22.0**. A plugin built for one Houdini version (e.g. 22.0)
-will not load in another (e.g. 20.5): you have to build it against
-the version you'll run it in, and older versions may need small code
-changes.
+There are two ways to install these SOPs:
+
+- **Prebuilt package (Windows, Houdini 20.5 and 22.0).** Download,
+  unzip, restart Houdini. Nothing to build and no settings to edit.
+- **Build from source**, for Linux, other Houdini versions, or
+  development. See [Building from source](#building-from-source).
+
+**Use one or the other, not both.** If the package is installed and
+you also have source-built `SOP_Read3mf` / `SOP_Save3mf` plugins in
+your own `houdiniX.Y/dso` folder, Houdini finds two copies of each
+node and which one you get isn't reliable. Before installing the
+package, delete any source-built copies (see
+[Switching from a source build](#switching-from-a-source-build)).
+
+Throughout, `houdiniX.Y` means the folder for **your** Houdini
+version, e.g. `houdini22.0` or `houdini20.5`. Copying an example path
+with the wrong version in it is an easy mistake to make.
+
+### Installing the package (Windows)
+
+1. From this repository's **Releases** page on GitHub, download
+   `palace3d_3mf-<version>-windows.zip`. The one zip works with both
+   Houdini 20.5 and 22.0.
+2. Find your Houdini user preferences folder. It is usually
+   `C:\Users\<you>\Documents\houdiniX.Y`, but if your Documents
+   folder is synced by OneDrive it may be somewhere like
+   `C:\Users\<you>\OneDrive - <Company>\Documents\houdiniX.Y`. To be
+   sure, open Houdini's **Python Shell** (Windows menu) and run:
+   ```
+   hou.homeHoudiniDirectory()
+   ```
+3. In that folder, create a folder named `packages` if there isn't
+   one already.
+4. Unzip the download into `packages`, so that it looks like this:
+   ```
+   houdiniX.Y\packages\palace3d_3mf.json
+   houdiniX.Y\packages\palace3d_3mf\...
+   ```
+   The `.json` file must be directly inside `packages`, not in a
+   subfolder: Houdini doesn't look in subfolders for it. (Windows'
+   "Extract All" offers a folder named after the zip; remove that
+   part of the path before extracting.)
+5. Restart Houdini. Both nodes are in the SOP Tab menu (type
+   "3mf"), and right-click > **Help** on either node shows its help
+   page.
+
+If you use both Houdini 20.5 and 22.0, unzip into each version's
+`packages` folder.
+
+**Updating:** delete `palace3d_3mf.json` and the `palace3d_3mf`
+folder from `packages`, unzip the new version there, and restart
+Houdini. **Uninstalling:** delete the same two.
+
+**If the nodes don't appear,** set the environment variable
+`HOUDINI_PACKAGE_VERBOSE=1` and start `hbatch.exe` from a Command
+Prompt (it's in Houdini's `bin` folder): Houdini then prints which
+package files it found and what it did with them. A package for the
+wrong Houdini version is skipped silently: it only loads in 20.5.x
+and 22.0.x.
+
+### Switching from a source build
+
+If you built these SOPs yourself before, remove that build before
+installing the package. In your `houdiniX.Y\dso` folder, delete
+`SOP_Read3mf.dll` and `SOP_Save3mf.dll`, and `minizip.dll` and
+`z.dll` if they're there. Help pages you copied into
+`houdiniX.Y\help\nodes\sop\` (`hdk_read3mf.txt`, `hdk_save3mf.txt`)
+can go too, since the package has its own. You can also remove the
+`PATH = ".../dso;$PATH"` line older instructions had you add to
+`houdini.env`.
+
+### Building from source
+
+The SOPs are built against your own Houdini install, using the HDK
+(Houdini Development Kit) that comes with every copy of Houdini, in
+`$HFS/toolkit/`. They have been built and tested with **Houdini
+22.0** (and, for the prebuilt package, 20.5). A plugin built for one
+Houdini version (e.g. 22.0) will not load in another (e.g. 20.5):
+you have to build it against the version you'll run it in, and older
+versions may need small code changes.
+
+A source build puts the plugins in your own `houdiniX.Y/dso` folder.
+Don't have the package installed at the same time (see above).
 
 1. Clone this repository, or download it as a ZIP from GitHub's
    **Code** button and unzip it, anywhere you like in a folder you
@@ -31,11 +108,7 @@ changes.
    there.)
 2. Follow the platform-specific build steps below.
 
-Throughout, `houdiniX.Y` means the folder for **your** Houdini
-version, e.g. `houdini22.0` or `houdini20.5`. Copying an example path
-with the wrong version in it is an easy mistake to make.
-
-### Building on Fedora / Linux
+#### Building on Fedora / Linux
 
 Prerequisites: a C++ compiler (gcc), CMake, and the `minizip` and
 `zlib` development packages (e.g. `minizip-ng-compat-devel` or
@@ -55,12 +128,12 @@ mkdir build && cd build
 cmake ..
 make
 ```
-This installs the built `.so` into `$HOME/houdiniX.Y/dso/`
+This puts the built `.so` into `$HOME/houdiniX.Y/dso/`
 automatically via `houdini_configure_target()`.
 
-### Building on Windows
+#### Building on Windows
 
-#### Prerequisites
+##### Prerequisites
 
 - **Visual Studio**, with the **Desktop development with C++**
   workload. The free Community edition is fine. Note that Visual
@@ -69,16 +142,21 @@ automatically via `houdini_configure_target()`.
 - **CMake**, the standalone install from cmake.org, added to `PATH`
   (the installer offers this).
 - **Git**, which vcpkg needs.
-- **[vcpkg](https://github.com/microsoft/vcpkg)**, with minizip
-  installed. Install Visual Studio first; vcpkg uses its compiler.
+- **[vcpkg](https://github.com/microsoft/vcpkg)**, with the static
+  build of minizip installed. Install Visual Studio first; vcpkg
+  uses its compiler.
   ```
   git clone https://github.com/microsoft/vcpkg
   cd vcpkg
   .\bootstrap-vcpkg.bat
-  .\vcpkg install minizip
+  .\vcpkg install minizip:x64-windows-static-md
   ```
+  The `x64-windows-static-md` part matters: it builds minizip and
+  zlib as static libraries, which are linked into the plugins
+  themselves, so there are no extra DLLs to find at load time. The
+  CMake files ask vcpkg for this version automatically.
 
-#### Check your compiler version
+##### Check your compiler version
 
 Each Houdini version only loads plugins built with a certain range
 of Microsoft C++ compiler versions. A brand-new Visual Studio can
@@ -104,7 +182,7 @@ you build:
    the configure command below, and check that CMake now reports the
    older compiler.
 
-#### Build
+##### Build
 
 Use Houdini's **Command Line Tools** shell, which sets the `HFS`
 variable CMake needs. (It doesn't need to run as administrator, as
@@ -115,78 +193,79 @@ cmake -B build -S . -DCMAKE_TOOLCHAIN_FILE=<path-to-vcpkg>/scripts/buildsystems/
 cmake --build build --config Release
 ```
 **Don't leave out `--config Release`.** Without it, Visual Studio
-makes a Debug build, which Houdini won't load. (A sign of this is
-`zd.dll` and `minizipd.dll`, with a "d" at the end, appearing in your
-`dso` folder.)
+makes a Debug build, which Houdini won't load.
 
-This installs the built `.dll` (plus its `minizip.dll`/`z.dll`
-runtime dependencies) into your `houdiniX.Y\dso\` folder
-automatically.
+This puts the built `.dll` into your `houdiniX.Y\dso\` folder
+automatically. Nothing else needs to go with it, and no `PATH`
+change is needed.
 
-If you change anything about the compiler or the Houdini version,
-delete the `build` folder and configure again: CMake remembers the
-compiler it chose the first time.
+If you change anything about the compiler, the Houdini version, or
+the vcpkg triplet, delete the `build` folder and configure again:
+CMake remembers what it chose the first time.
 
-#### Add the `dso` folder to `PATH`
-
-**This step is required.** Without it, the plugin builds fine but
-fails to load in Houdini, with no visible error message in the
-normal GUI. Windows doesn't reliably find a plugin DLL's own
-dependencies (here, `minizip.dll` and `z.dll`) in the folder the
-plugin is loaded from.
-
-First find your Houdini user preferences folder. It is usually
-`C:\Users\<you>\Documents\houdiniX.Y`, but if your Documents folder
-is synced by OneDrive it may be somewhere like
-`C:\Users\<you>\OneDrive - <Company>\Documents\houdiniX.Y`. To be
-sure, open Houdini's **Python Shell** (Windows menu) and run:
-```
-hou.homeHoudiniDirectory()
-```
-In that folder, open (or create) `houdini.env` in a text editor and
-add this line, using that folder's path with forward slashes and
-keeping the quotes:
-```
-PATH = "<your-houdini-user-pref-folder>/dso;$PATH"
-```
-e.g. `PATH = "C:/Users/<you>/Documents/houdini22.0/dso;$PATH"`.
-Houdini reads `houdini.env` at every startup. To check that it
-took, run `import os; print(os.environ["PATH"])` in the Python
-Shell and look for your `dso` folder.
-
-#### Troubleshooting
+##### Troubleshooting
 
 If a node doesn't appear in the Tab menu after building, the plugin
 failed to load. To see why, set the environment variable
 `HOUDINI_DSO_ERROR=2` and launch `hbatch.exe` (not `houdinifx.exe`,
 which has no console to print to) from a terminal. Then:
 
-- **"Couldn't load ... z.dll" or "... minizip.dll", "Missing version
-  information."** Harmless. Houdini tries every DLL in `dso` as a
-  plugin, and these two are libraries, not plugins. You'll only see
-  these messages with `HOUDINI_DSO_ERROR` set.
 - **"Couldn't load ... SOP_Read3mf.dll", "Incompatible compiler
   versions."** Your compiler is outside this Houdini's range. See
   "Check your compiler version" above.
 - **"Couldn't load ... SOP_Read3mf.dll", "The specified module could
   not be found."** The plugin was found, but a DLL it needs wasn't.
-  Check the `PATH` step above, and that you built with `--config
+  Usually this is a Debug build: check that you built with `--config
   Release`. To list exactly what the plugin needs, run this from a
   Visual Studio "Developer Command Prompt":
   ```
   dumpbin /dependents <path-to-your-dso-folder>\SOP_Read3mf.dll
   ```
   Any name ending in `D.dll` (like `MSVCP140D.dll`) means a Debug
-  build.
+  build. `minizip.dll` or `z.dll` in the list means minizip was
+  linked as a DLL: make sure vcpkg has `minizip:x64-windows-static-md`
+  installed, delete the `build` folder, and configure again.
+- **"Couldn't load ... z.dll" or "... minizip.dll", "Missing version
+  information."** Left over from an older build, which put these
+  next to the plugins. Delete both from your `dso` folder.
+
+### Building the release package (maintainers)
+
+`packaging/` holds what's needed to make the prebuilt Windows
+package:
+
+- `palace3d_3mf.json`: the Houdini package file. It enables the
+  package only on Windows in Houdini 20.5.x and 22.0.x, and points
+  Houdini at the matching build's `dso` folder and at the shared help
+  pages, using `$HOUDINI_PACKAGE_PATH` so users edit nothing.
+- `build_release.bat`: builds both SOPs in Release for each Houdini
+  version listed at its top (into `build-20.5` and `build-22.0`),
+  stages the package in `dist\stage`, and zips it into
+  `dist\palace3d_3mf-<version>-windows.zip`. Set the Houdini install
+  paths, any MSVC toolset needed for 20.5, and the vcpkg folder at
+  the top of the script, then run it from a normal Command Prompt
+  with the release version: `packaging\build_release.bat 1.0.0`.
+  It makes no zip unless every version was built.
+- `test_package.bat` (with `check_package.py`): installs the staged
+  package into a throwaway preferences folder
+  (`C:\houdini-package-test\houdiniX.Y`), checks with hython that
+  both SOPs load from the package, then starts Houdini with that
+  folder: `packaging\test_package.bat 22.0`. Your own preferences
+  folder, its `dso` folder, and its `houdini.env` aren't read, so
+  this shows what a new user gets.
+
+Upload the zip to a GitHub Release; `build-*` and `dist` are not
+committed.
 
 ## Node Help
 
 Each SOP has help documentation, written in SideFX's wiki markup
 format, alongside its source: `SOP_Save3mf/hdk_save3mf.txt` and
-`SOP_Read3mf/hdk_read3mf.txt`.
+`SOP_Read3mf/hdk_read3mf.txt`. The prebuilt package includes both,
+so this section is only for source builds.
 
 To make Houdini show this as real, working node help (right-click
-a node > Help), move both files into Houdini's shared node-help
+a node > Help), copy both files into Houdini's shared node-help
 folder:
 ```
 $HOUDINI_USER_PREF_DIR/help/nodes/sop/
@@ -207,6 +286,13 @@ decodes the file's colors back to linear when it reads. Without the
 conversion, colors made in Houdini look darker once they leave it
 (in a slicer, in other viewers, and on the printed part) than they
 did in the viewport. Texture images are not changed either way.
+
+**Exporter version.** `Save3mf` records the version of what it
+writes in each file's `Application` metadata. The current `Save3mf`
+writes `Houdini 3MF Export 3.1`. This number changes only when the
+contents of the files `Save3mf` writes change, so it is separate from
+the release number of the package: a release that only fixes other
+things still writes `Houdini 3MF Export 3.1`.
 
 **Files from Save3mf 3.0 and earlier.** Before version 3.1,
 `Save3mf` wrote linear `Cd` values into the file without converting
@@ -262,7 +348,9 @@ Vendored in this repository (no separate install needed):
 - `stb_image_write.h`
 
 Not vendored — install via your platform's package manager
-(Fedora) or vcpkg (Windows), as described above:
+(Fedora) or vcpkg (Windows), as described above. On Windows they are
+linked statically into the plugins, so the prebuilt package has no
+other DLLs:
 - `minizip`
 - `zlib`
 
