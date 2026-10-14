@@ -1,0 +1,11 @@
+{
+    "enable": "houdini_os == 'windows' and ((houdini_version >= '20.5' and houdini_version < '20.6') or (houdini_version >= '22.0' and houdini_version < '22.1'))",
+    "env": [
+        { "PALACE3D_3MF": "$HOUDINI_PACKAGE_PATH/palace3d_3mf" },
+        { "PALACE3D_3MF_BUILD": [
+            { "houdini_version >= '20.5' and houdini_version < '20.6'": "$PALACE3D_3MF/houdini20.5" },
+            { "houdini_version >= '22.0' and houdini_version < '22.1'": "$PALACE3D_3MF/houdini22.0" }
+        ] }
+    ],
+    "hpath": [ "$PALACE3D_3MF_BUILD", "$PALACE3D_3MF" ]
+}

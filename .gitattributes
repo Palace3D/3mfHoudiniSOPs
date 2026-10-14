@@ -1,0 +1,3 @@
+# Windows batch files need CRLF line endings: with LF only, cmd can misread
+# labels and goto/call. Keep them CRLF in every checkout, Linux included.
+*.bat text eol=crlf

@@ -1,5 +1,13 @@
 cmake_minimum_required( VERSION 3.16 )
 
+# On Windows, use vcpkg's static minizip and zlib, built against the same dynamic C runtime Houdini uses
+# (/MD). They are then linked into the plugin itself: no minizip.dll or z.dll next to it, and no PATH
+# entry needed. This has to be set before project(), where the vcpkg toolchain reads it. Pass
+# -DVCPKG_TARGET_TRIPLET=... when configuring to use a different triplet.
+if( CMAKE_HOST_WIN32 AND NOT DEFINED VCPKG_TARGET_TRIPLET )
+    set( VCPKG_TARGET_TRIPLET "x64-windows-static-md" CACHE STRING "vcpkg triplet for minizip and zlib" )
+endif()
+
 project( SOP_Save3mf )
 
 # CMAKE_PREFIX_PATH must contain the path to the toolkit/cmake subdirectory of
@@ -28,8 +36,28 @@ find_package( ZLIB REQUIRED )
 # vcpkg (through the toolchain file given when configuring); on Linux, from the
 # system's minizip package.
 if( WIN32 )
-    find_package( minizip CONFIG REQUIRED )
-    set( MINIZIP_LIBRARY MINIZIP::minizip )
+    # vcpkg's minizip has named its CMake package and target differently over time
+    # (minizip / unofficial-minizip; MINIZIP::minizip, minizip::minizip, ...), so take
+    # whichever this vcpkg provides.
+    find_package( minizip CONFIG QUIET )
+    if( NOT minizip_FOUND )
+        find_package( unofficial-minizip CONFIG QUIET )
+    endif()
+    set( MINIZIP_LIBRARY "" )
+    get_property( _imported DIRECTORY PROPERTY IMPORTED_TARGETS )
+    foreach( _t ${_imported} )
+        string( TOLOWER "${_t}" _tl )
+        if( _tl MATCHES "minizip" AND NOT MINIZIP_LIBRARY )
+            set( MINIZIP_LIBRARY ${_t} )
+        endif()
+    endforeach()
+    if( NOT MINIZIP_LIBRARY )
+        message( FATAL_ERROR "minizip not found through vcpkg (triplet ${VCPKG_TARGET_TRIPLET}). Check that "
+                             "'vcpkg install minizip:${VCPKG_TARGET_TRIPLET}' succeeded, and that the configure "
+                             "command passes -DCMAKE_TOOLCHAIN_FILE=<vcpkg>/scripts/buildsystems/vcpkg.cmake. "
+                             "Imported targets found: ${_imported}" )
+    endif()
+    message( STATUS "Using minizip target ${MINIZIP_LIBRARY}" )
 else()
     find_library( MINIZIP_LIBRARY NAMES minizip minizip-ng-compat minizip-ng PATHS /usr/lib64 )
     if( NOT MINIZIP_LIBRARY )
@@ -56,6 +84,24 @@ if( NOT WIN32 )
     target_include_directories( ${library_name} PRIVATE /usr/include/minizip )
 endif()
 
-# Sets several common target properties, such as the library's output directory, and
-# installs the built plugin into the user's houdiniX.Y/dso folder.
+# Sets several common target properties, such as the library's output directory, so the
+# built plugin goes straight into the user's houdiniX.Y/dso folder.
 houdini_configure_target( ${library_name} )
+
+# Optional: build the plugin into another folder instead of the user's houdiniX.Y/dso.
+# packaging/build_release.bat sets this to the package layout's houdiniX.Y/dso folder, so
+# release builds never touch your own Houdini preferences. Leave it empty for normal builds.
+set( PALACE3D_DSO_DIR "" CACHE PATH "Folder to build the plugin into (empty: your houdiniX.Y/dso folder)" )
+if( PALACE3D_DSO_DIR )
+    file( TO_CMAKE_PATH "${PALACE3D_DSO_DIR}" _dso_dir )
+    message( STATUS "Building the plugin into ${_dso_dir}" )
+    # The plugin itself (a .dll is a "runtime" output, a .so a "library" output). The import
+    # library (.lib/.exp) stays in the build folder, out of the package.
+    foreach( _cfg "" _DEBUG _RELEASE _RELWITHDEBINFO _MINSIZEREL )
+        set_target_properties( ${library_name} PROPERTIES
+            RUNTIME_OUTPUT_DIRECTORY${_cfg} "${_dso_dir}"
+            LIBRARY_OUTPUT_DIRECTORY${_cfg} "${_dso_dir}"
+            ARCHIVE_OUTPUT_DIRECTORY${_cfg} "${CMAKE_CURRENT_BINARY_DIR}/lib"
+        )
+    endforeach()
+endif()

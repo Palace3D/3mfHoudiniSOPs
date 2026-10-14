@@ -1,15 +1,18 @@
 # Global Ignore
 *
 !.gitignore
+!.gitattributes
 !README.md
 
-# Allow the SOP_Read3mf and SOP_Save3mf directories themselves (but not their contents)
+# Allow the SOP_Read3mf, SOP_Save3mf and packaging directories themselves (but not their contents)
 !SOP_Read3mf/
 !SOP_Save3mf/
+!packaging/
 
 # Ignore everything INSIDE the directories
 SOP_Read3mf/*
 SOP_Save3mf/*
+packaging/*
 
 # Allow ONLY the specific files we need
 !SOP_Read3mf/SOP_Read3mf.C
@@ -24,3 +27,10 @@ SOP_Save3mf/*
 !SOP_Save3mf/SOP_Save3mf.h
 !SOP_Save3mf/CMakeLists.txt
 !SOP_Save3mf/hdk_save3mf.txt
+!packaging/palace3d_3mf.json
+!packaging/build_release.bat
+!packaging/test_package.bat
+!packaging/check_package.py
+
+# build-20.5/, build-22.0/ and dist/ (release builds and zips) stay ignored by the
+# first rule. Release zips go on GitHub Releases.
