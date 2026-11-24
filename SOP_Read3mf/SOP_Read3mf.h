@@ -46,6 +46,8 @@
 #include <map>
 #include <unordered_map>
 #include <unordered_set>
+#include <functional>
+#include <memory>
 #include <chrono>
 #include <sstream>
 #include <iostream>
@@ -447,8 +449,17 @@ namespace HDK_Sample {
         std::string     theModel;
 
         // Name of the root model file inside the 3mf package (e.g. "3D/3dmodel.model"), as opposed to its path on
-        // disk. Set in cookMySop(), and used to tell references to the root file from references to other files.
+        // disk. Set in read() and cookMySop(), and used to tell references to the root file from references to
+        // other files.
         std::string     rootModelPart;
+
+        // Name of the model file whose resources are being read, with a leading slash (e.g. "/3D/3dmodel.model"),
+        // for the model_file attribute.
+        std::string     currentModelPart;
+
+        // Whether the matnet and the override shader have been made during this read (see ensureMaterialNetwork())
+        bool            matnetMade = false;
+        bool            overrideMade = false;
 
 	// Metadata we capture from the 3mf header which we add as detail attributes to the model.
 	std::string importedTitle;
@@ -525,8 +536,17 @@ namespace HDK_Sample {
         // key: object id if it's listed in the build feature, value: a list of transforms for the object
         UT_Map<int, std::vector<UT_Matrix4>>     buildDict;
 
+        // Ids of the objects used as a component of another object. Without build instructions, only objects not
+        // in here are placed, so a component's geometry isn't placed both on its own and inside what uses it.
+        std::unordered_set<int>                  componentIds;
+
         void                        matnetOverrideSetup();
         void                        matnetSetup();
+        void                        ensureMaterialNetwork();
+        void                        noteDecorFeatures(tinyxml2::XMLDocument *doc);
+        void                        readError(const std::string &message);
+        SOP_Read3mf::ErrorCode      processReferencedModels(tinyxml2::XMLElement *root,
+            const std::function<SOP_Read3mf::ErrorCode(tinyxml2::XMLElement *)> &handleModel);
         static int                  read(void *data, int index, fpreal t, const PRM_Template *tplate);
         // SOP_Read3mf::ErrorCode   read3mf_archive(const std::vector<SOP_Read3mf::FileEntry>& files_to_add);
         SOP_Read3mf::ErrorCode      handleShaders();

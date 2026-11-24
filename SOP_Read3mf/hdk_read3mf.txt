@@ -44,11 +44,28 @@ Save3mf sets those itself and doesn't allow overriding them.
 
 Primitive attributes, tagging every primitive with which 3mf
 `<object>` it came from:
-- `object_id` (integer) — the object's 3mf id. Unique per object,
-  per the 3mf spec, even if two objects share the same name (or
-  have no name at all).
+- `object_id` (integer) — the id of the object whose mesh the
+  primitive came from. Unique per object across the whole import,
+  even if two objects share the same name (or have no name at all),
+  or come from different model files (see `file_object_id`).
 - `mesh_name` (string) — the object's `name` attribute, if it had
   one, otherwise empty.
+- `model_file` (string) — the model file inside the 3mf package
+  that the object came from, e.g. `/3D/3dmodel.model`.
+- `file_object_id` (integer) — the object's id in that file. Each
+  model file numbers its objects separately, so an object from a
+  file other than the root model file gets a new `object_id`, unique
+  across the import, and this keeps the original. For an object in
+  the root model file it is the same as `object_id`.
+- `build_object_id` (integer) — the id of the object the primitive
+  was placed as part of: the object a `<build>` item names, or with
+  Apply Build Instructions off, the top-level object that was placed.
+  An object can be built from other objects (its components), and
+  then its primitives keep the `object_id` of the component they
+  came from, so this is what tells which placed object they belong
+  to. In a file from Bambu Studio, for instance, each part is a
+  wrapper object around a mesh object in another model file:
+  `object_id` gives the mesh object, and `build_object_id` the part.
 
 NOTE:
     These survive merging multiple objects into one piece of
@@ -124,12 +141,12 @@ or warning on the node when a file is affected.
   as a layer of a multiproperties group makes the import stop with an
   error naming the group whenever that multiproperties group is used.
 
-- Models in several files. Only the root model file of a 3mf
-  package is currently read. Models whose objects live in other model
-  files (the Production Extension's `p:path` attribute on components
-  and build items) are not supported. The other files are not parsed,
-  and the import stops with an error naming the file as soon as it
-  meets a component or build item that points into one.
+- Models in several files. Read3mf reads models whose objects live
+  in other model files (the Production Extension's `p:path` attribute
+  on components and build items), as Bambu Studio writes them. A model
+  file that uses a different unit from the root model file is not
+  currently supported, and the import stops with an error naming the
+  file.
 
 - Other extensions. Read3mf currently understands only the
   Materials and Production extensions. If a file says it requires any
@@ -158,8 +175,13 @@ Apply Build Instructions:
     regardless of whether it's referenced by a build item — each
     one exactly once, at its own identity transform (its original,
     local placement, ignoring whatever transform a build item would
-    have applied). Useful for debugging, or for inspecting resources
-    that aren't referenced by any build item at all.
+    have applied). An object used as a component of another object
+    comes in as part of each object that uses it, rather than also
+    on its own. Useful for debugging, for inspecting resources that
+    aren't referenced by any build item at all, or for undoing a
+    slicer's placement of a part on its build plate (files from
+    slicers such as Bambu Studio put the part where it sits on the
+    plate, often far from the origin).
 
 Only Geometry:
     #id: geo

@@ -48,6 +48,8 @@
 #include <atomic>
 #include <iostream>
 #include <SOP/SOP_Node.h>
+#include <GU/GU_DetailHandle.h>
+#include <UT/UT_Matrix4.h>
 
 //
 // Utility function for logging debug info
@@ -123,7 +125,10 @@ private:
     // Version of this exporter, written into the 3mf file's Application metadata.
     // 3.0: original
     // 3.1: colors are written as sRGB if the "Convert sRGB" toggle is on (and it is by default)
-    static constexpr const char*    EXPORTER_VERSION = "3.1";
+    // 3.2: optionally several objects, split by a primitive attribute ("Split into Objects"); object ids come
+    //      from that attribute; mesh names come from the mesh_name primitive attribute instead of the out_mesh
+    //      detail attribute; optionally packed primitives as instances ("Allow Packed Instances")
+    static constexpr const char*    EXPORTER_VERSION = "3.2";
     // Color for default object-level property, unless discovered otherwise
     static constexpr std::array<int, 3>    DEFAULT_COLOR = {0xff, 0xff, 0xff};
 
@@ -139,6 +144,9 @@ private:
     bool                DEBUG(fpreal t) { return evalInt("debug", 0, t); }
     bool                TIMER(fpreal t) { return evalInt("timer", 0, t); }
     bool                DEBUGFILES(fpreal t) { return evalInt("debugfiles", 0, t); }
+    bool                SPLITOBJECTS(fpreal t) { return evalInt("splitObjects", 0, t); }
+    bool                ALLOWPACKED(fpreal t) { return evalInt("allowPacked", 0, t); }
+    void                OBJECTATTRIB(std::string& my_attrib, fpreal t) { UT_StringHolder result; evalString(result, "objectAttrib", 0, t); my_attrib = result.toStdString(); return;}
     std::string         filename;
     std::string         mesh;
     bool                flip = true;
@@ -150,6 +158,16 @@ private:
     std::string         title;
     std::string         description;
     std::string         designer;
+    bool                splitObjects = false;
+    std::string         objectAttrib;
+    bool                allowPacked = false;
+
+    // Errors and warnings from the last save, put back on the node on each cook that doesn't save
+    std::vector<std::string>    lastSaveErrors;
+    std::vector<std::string>    lastSaveWarnings;
+    void                saveError(const std::string& message);
+    void                saveWarning(const std::string& message);
+    void                showLastSaveMessages();
 
     // Set true in save so when cookMySop is forced to run it know it needs to save the geometry
     std::atomic<bool>   saveGeometry;    // Initialized to false in the class constructor's initialization list
@@ -159,6 +177,36 @@ private:
         std::string     source_path;
         std::string     archive_path;
     };
+
+    // One 3mf object when splitting by attribute: its name, the primitives (offsets) in it, and the id to
+    // write it with (0 = take the next free resource id)
+    struct ObjectPart {
+        std::string             name;
+        std::vector<GA_Offset>  prims;
+        int                     fileId = 0;
+    };
+
+    // Allow Packed Instances: a packed primitive placing a packed geometry (index into the list of distinct
+    // geometries) with its full transform
+    struct PackedPlacement {
+        size_t                  geo = 0;
+        UT_Matrix4D             xform;
+    };
+
+    // A distinct packed geometry (all instances share one): its own primitives (in the combined detail), the
+    // packed primitives inside it, its id and name from its attributes, and the ids it was written with
+    struct PackedGeo {
+        std::vector<GA_Offset>          prims;
+        std::vector<PackedPlacement>    children;
+        int                             fileId = 0;     // from the Object Attribute; 0 = automatic
+        std::string                     name;
+        int                             meshObjId = 0;  // object for its own primitives
+        int                             objId = 0;      // object that placements refer to
+        bool                            written = false;
+    };
+
+    // Keeps packed geometries alive during a save, since they're told apart by address
+    std::vector<GU_ConstDetailHandle>   packedHandles;
 
     // A struct to hold base color texture info for a prim
     struct BaseColorInfo {
@@ -243,7 +291,25 @@ private:
     void                    writeHeader(bool material_ext = false, bool boolean_ext = false, bool production_ext = false);
     SOP_Save3mf::ErrorCode  buildModel(const GU_Detail* gdp);
     SOP_Save3mf::ErrorCode  write3mfItem(const GU_Detail* gdp, int objectId);
-    SOP_Save3mf::ErrorCode  write3mfObjectMesh(const GU_Detail* gdp);
+    SOP_Save3mf::ErrorCode  write3mfObjectMesh(const GU_Detail* gdp, int objId, const std::string& objName,
+                                const std::vector<GA_Offset>* prims, const UT_Matrix4D* xform = nullptr);
+    SOP_Save3mf::ErrorCode  checkPrimitives(const GU_Detail* gdp, const std::string& where);
+    SOP_Save3mf::ErrorCode  gatherObjects(const GU_Detail* gdp, const std::vector<GA_Offset>& prims,
+                                std::vector<ObjectPart>& parts);
+    std::string             singleObjectName(const GU_Detail* gdp, const std::vector<GA_Offset>& prims,
+                                const std::string& where);
+    SOP_Save3mf::ErrorCode  checkObjectIds(const GU_Detail* gdp, const std::vector<GA_Offset>& prims,
+                                const std::string& where);
+    int                     singleObjectId(const GU_Detail* gdp, const std::vector<GA_Offset>& prims,
+                                const std::string& where);
+    void                    writeItem(int objId, const std::string& xform);
+    SOP_Save3mf::ErrorCode  gatherPacked(const GU_Detail* input, GU_Detail& work, std::vector<GA_Offset>& topPrims,
+                                std::vector<ObjectPart>& topParts, int& topId, std::string& topName,
+                                std::vector<PackedGeo>& geos, std::vector<PackedPlacement>& placements);
+    SOP_Save3mf::ErrorCode  writePackedGeo(const GU_Detail* work, std::vector<PackedGeo>& geos, size_t i);
+    SOP_Save3mf::ErrorCode  writeMirrored(const GU_Detail* work, std::vector<PackedGeo>& geos,
+                                const PackedPlacement& placement, int& bakedId);
+    void                    warnMeshNameIgnored();
     SOP_Save3mf::ErrorCode  saveColors(const GU_Detail* gdp);
     void                    defaultColor(const GU_Detail* gdp);
     SOP_Save3mf::ErrorCode  saveTextures(const GU_Detail* gdp);

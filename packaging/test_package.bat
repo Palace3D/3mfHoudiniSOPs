@@ -12,11 +12,12 @@ rem
 rem  Your own preferences folder (and any source-built DLLs in its dso folder,
 rem  and its houdini.env) is never read, so this tests what a new user gets.
 rem
-rem  Usage:  packaging\test_package.bat [22.0 or 20.5]     default 22.0
+rem  Usage:  packaging\test_package.bat [22.0, 21.0 or 20.5]     default 22.0
 rem ===========================================================================
 
 rem ---- Settings for this machine (same paths as build_release.bat) ----------
 set "HOUDINI_22_0=C:\Program Files\Side Effects Software\Houdini 22.0.429"
+set "HOUDINI_21_0=C:\Program Files\Side Effects Software\Houdini 21.0.792"
 set "HOUDINI_20_5=C:\Program Files\Side Effects Software\Houdini 20.5.684"
 set "TESTROOT=C:\houdini-package-test"
 rem ----------------------------------------------------------------------------
@@ -25,9 +26,10 @@ set "HVER=%~1"
 if "%HVER%"=="" set "HVER=22.0"
 set "HPATH="
 if "%HVER%"=="22.0" set "HPATH=%HOUDINI_22_0%"
+if "%HVER%"=="21.0" set "HPATH=%HOUDINI_21_0%"
 if "%HVER%"=="20.5" set "HPATH=%HOUDINI_20_5%"
 if "%HPATH%"=="" (
-    echo ERROR: no install path set for Houdini %HVER%. Use 22.0 or 20.5, and fill in the path above.
+    echo ERROR: no install path set for Houdini %HVER%. Use 22.0, 21.0 or 20.5, and fill in the path above.
     exit /b 1
 )
 if not exist "%HPATH%\bin\hython.exe" (

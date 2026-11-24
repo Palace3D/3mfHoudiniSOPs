@@ -35,6 +35,12 @@ set "HOUDINI_22_0=C:\Program Files\Side Effects Software\Houdini 22.0.429"
 set "TOOLSET_22_0="
 set "TRIPLET_22_0=x64-windows-static-md"
 
+rem Houdini 21.0: built by SideFX with cl 19.42, and accepts compilers 19.00
+rem to 19.59, so Visual Studio's default compiler works, as for 22.0.
+set "HOUDINI_21_0=C:\Program Files\Side Effects Software\Houdini 21.0.792"
+set "TOOLSET_21_0="
+set "TRIPLET_21_0=x64-windows-static-md"
+
 rem Houdini 20.5: built by SideFX with cl 19.35, so we use build tools 14.35
 rem (Visual Studio Installer: "MSVC v143 - VS 2022 C++ x64/x86 build tools
 rem (v14.35-17.5)").
@@ -77,6 +83,8 @@ mkdir "%PKG%\help\nodes\sop"
 if errorlevel 1 goto :fail
 
 call :build_version 22.0 "%HOUDINI_22_0%" "%TOOLSET_22_0%" "%TRIPLET_22_0%"
+if errorlevel 1 goto :fail
+call :build_version 21.0 "%HOUDINI_21_0%" "%TOOLSET_21_0%" "%TRIPLET_21_0%"
 if errorlevel 1 goto :fail
 call :build_version 20.5 "%HOUDINI_20_5%" "%TOOLSET_20_5%" "%TRIPLET_20_5%"
 if errorlevel 1 goto :fail

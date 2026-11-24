@@ -65,6 +65,9 @@
 #include <UT/UT_JSONParser.h>
 #include <UT/UT_JSONValue.h>
 #include <GEO/GEO_Primitive.h>
+#include <GU/GU_PrimPacked.h>
+#include <map>
+#include <functional>
 #include <FS/FS_Writer.h>
 //#include <UT/UT_Error.h>
 #include <filesystem>
@@ -82,6 +85,10 @@
 
 namespace fs = std::filesystem;
 using namespace HDK_Sample;
+
+// Defined further down, used before that.
+static std::vector<GA_Offset>   allPrims(const GU_Detail* gdp);
+static std::string              transformString(const UT_Matrix4D& m);
 
 // Provide entry point for installing this SOP.
 void
@@ -113,6 +120,9 @@ static PRM_Name names[] = {
     PRM_Name("saveBtn", "Save"),        // Save it
     // Listed last so the indices above don't shift. The order in the parameter pane is set by myTemplateList.
     PRM_Name("convertSRGB", "Convert sRGB"), // Houdini's Cd is linear, 3mf colors are sRGB
+    PRM_Name("splitObjects", "Split into Objects"), // One 3mf object per value of a primitive attribute
+    PRM_Name("objectAttrib", "Object Attribute"),   // The primitive attribute to split by
+    PRM_Name("allowPacked", "Allow Packed Instances"), // Write packed primitives as 3mf instances
 };
 
 // SOP parameter defaults
@@ -127,6 +137,11 @@ static PRM_Default  filen(0, "my-model.3mf");
 static PRM_Default  titlen(0, "Model Saved from Houdini");
 static PRM_Default  descriptionn(0, "");
 static PRM_Default  designern(0, "");
+// Off by default: a parameter left at its default isn't stored in the hip file, so a default of on would
+// change what existing Save3mf nodes write (files from Read3mf carry object_id).
+static PRM_Default  splitn(0);
+static PRM_Default  objectattribn(0, "object_id"); // The attribute Read3mf writes
+static PRM_Default  allowpackedn(0);    // Off: packed input is an error, as in earlier versions
 
 // SOP parameter template
 // type, vector size, nameptr, defaultsptr, choiceptr, rangeptr, callbackfunc, ...
@@ -139,7 +154,10 @@ SOP_Save3mf::myTemplateList[] = {
     PRM_Template(PRM_Type(PRM_TOGGLE) | PRM_TYPE_INVISIBLE,    1, &names[2], &debugit, 0, 0, 0, 0, 1, "Print debug information."),
     PRM_Template(PRM_TOGGLE,    1, &names[3], &timeit, 0, 0, 0, 0, 1, "Report the time it took to save the model."),
     PRM_Template(PRM_TOGGLE,    1, &names[4], &debugfilesn, 0, 0, 0, 0, 1, "Preserve intermediate model files in your temp folder for inspection."),
-    PRM_Template(PRM_STRING,	1, &names[5], &meshn, 0, 0, 0, 0, 1, "Give a name to the mesh in the 3mf file. If this parameter is empty and a detail string attribute out_mesh is set, that attribute value will be used."),
+    PRM_Template(PRM_TOGGLE,    1, &names[12], &splitn, 0, 0, 0, 0, 1, "Write one 3mf object per distinct value of the Object Attribute, instead of a single object for the whole input."),
+    PRM_Template(PRM_STRING,    1, &names[13], &objectattribn, 0, 0, 0, 0, 1, "Primitive attribute holding each primitive's object id. With an integer attribute, the values (1 or greater) become the objects' ids in the file: with Split into Objects on, one object per value; with it off, the single object takes the first primitive's value. A string attribute can be used for splitting, with the objects numbered automatically. The default, object_id, is the attribute Read3mf adds."),
+    PRM_Template(PRM_TOGGLE,    1, &names[14], &allowpackedn, 0, 0, 0, 0, 1, "Write packed primitives as 3mf instances: each distinct packed geometry is written once, as an object, and each packed primitive becomes a build item placing it with its transform. Packs inside packs become 3mf components. Off: packed primitives are an error; unpack them first."),
+    PRM_Template(PRM_STRING,	1, &names[5], &meshn, 0, 0, 0, 0, 1, "Name of the mesh in the 3mf file. If this is set it names every object. Leave it empty to name each object by its mesh_name primitive attribute, which Read3mf writes."),
     PRM_Template(PRM_FILE_E,	1, &names[6], &filen, 0, 0, 0, 0, 1, "Name of the 3mf output file. If this parameter is empty and a detail string attribute out_filename is set, then that attribute value will be used."),
     PRM_Template(PRM_STRING,    1, &names[7], &titlen, 0, 0, 0, 0, 1, "Optional title to include in the 3mf header. If this parameter is empty and a detail string attribute out_title is set, that attribute value will be used."),
     PRM_Template(PRM_STRING,    1, &names[8], &descriptionn, 0, 0, 0, 0, 1, "Optional description to include in the 3mf header. If this parameter is empty and a detail string attribute out_description is set, that attribute value will be used."),
@@ -246,6 +264,28 @@ convertColor(std::array<float, 3> CdFloat, bool encodeSRGB) {
 
 
 //
+// Make text safe to put inside an XML attribute value or element: &, <, >, " and ' become entities.
+// Names and metadata can come from anywhere (e.g. mesh_name from another program's file).
+//
+std::string
+xmlEscape(const std::string& text) {
+    std::string out;
+    out.reserve(text.size());
+    for (char c : text) {
+        switch (c) {
+        case '&':  out += "&amp;"; break;
+        case '<':  out += "&lt;"; break;
+        case '>':  out += "&gt;"; break;
+        case '"':  out += "&quot;"; break;
+        case '\'': out += "&apos;"; break;
+        default:   out += c; break;
+        }
+    }
+    return out;
+}
+
+
+//
 // Utility function to ensure all parent directories exist for a given file path.
 // Return true if the directories were created or already exist.
 //
@@ -347,6 +387,9 @@ SOP_Save3mf::clearData() {
     this->primTextCoords.clear();
     this->files_to_add.clear();
     this->modelOutput.clear();
+    this->lastSaveErrors.clear();
+    this->lastSaveWarnings.clear();
+    this->packedHandles.clear();
 
     return ErrorCode::SUCCESS;
 }
@@ -506,10 +549,13 @@ SOP_Save3mf::cookMySop(OP_Context &context)
     this->TITLE(this->title, t);
     this->DESCRIPTION(this->description, t);
     this->DESIGNER(this->designer, t);
+    this->splitObjects = this->SPLITOBJECTS(t);
+    this->OBJECTATTRIB(this->objectAttrib, t);
+    this->allowPacked = this->ALLOWPACKED(t);
 
     LOG_DEBUG(this->debug, "Entering cookMySop");
 
-    // If the incoming geometry carries string detail attributes named "out_filename", "out_mesh",
+    // If the incoming geometry carries string detail attributes named "out_filename",
     // "out_title", "out_description" or "out_designer", and the matching parameters are empty, use the
     // attributes for the parameter values. This lets upstream nodes (e.g. a wrangle building a name from
     // other parameters) drive these fields dynamically without needing an expression that would re-cook
@@ -533,10 +579,8 @@ SOP_Save3mf::cookMySop(OP_Context &context)
         return true;
     };
     useDetailAttr("out_filename", "File Name", this->filename);
-    // "out_mesh" is the documented name. "out_meshname" is what earlier versions read, so it still works.
-    if (!useDetailAttr("out_mesh", "Mesh Name", this->mesh)) {
-        useDetailAttr("out_meshname", "Mesh Name", this->mesh);
-    }
+    // Mesh names are per object, so they come from the mesh_name primitive attribute instead (see
+    // singleObjectName() and gatherObjects()). The out_mesh detail attribute of Save3mf 3.1 is gone.
     useDetailAttr("out_title", "Title", this->title);
     useDetailAttr("out_description", "Description", this->description);
     useDetailAttr("out_designer", "Designer", this->designer);
@@ -551,9 +595,12 @@ SOP_Save3mf::cookMySop(OP_Context &context)
     bool shouldSave = this->saveGeometry.exchange(false); 
 
     if (!shouldSave) {
-        // If we shouldn't save a geometry, the function exits, returning the cached geometry.
+        // If we shouldn't save a geometry, the function exits, returning the cached geometry. Houdini clears a
+        // node's messages at the start of every cook, so put back what the last save reported. A failed save's
+        // errors come back as warnings: an error would stop this node passing its geometry on.
+        this->showLastSaveMessages();
         LOG_DEBUG(this->debug, "Exiting cookMySop with no geometry to cook");
-        return OP_ERROR::UT_ERROR_NONE;
+        return this->error();
     }
     LOG_DEBUG(this->debug, "Should save is " + std::to_string(shouldSave));
     LOG_DEBUG(this->debug, "We need to save the geometry into a 3mf file.");
@@ -576,7 +623,8 @@ SOP_Save3mf::cookMySop(OP_Context &context)
     const std::string suffix = ".3mf";
     if (this->filename.empty()) {
         std::cerr << "Error: no filename was provided for output." << std::endl;
-        return this->error();  // I don't think this can be the right kind of return value. Fix XXX
+        this->saveError("No file name given, so nothing was saved.");
+        return this->error();
     }
     if (this->filename.length() < suffix.length() || (this->filename.rfind(suffix) != this->filename.length() - suffix.length())) {
         this->filename += suffix;
@@ -584,7 +632,12 @@ SOP_Save3mf::cookMySop(OP_Context &context)
 
     if ((myError = this->buildModel(this->gdp)) != SOP_Save3mf::ErrorCode::SUCCESS) {
         std::cerr << "Error: Unable to build 3mf model from geometry. Error code was " << std::to_string(static_cast<int>(myError)) << std::endl;
-        return this->error(); // Fix to the right kind of return value XXX
+        // Most failures put their own error on the node. Make sure there's always one, so a failed save
+        // never looks like a successful one.
+        if (this->lastSaveErrors.empty()) {
+            this->saveError("Unable to build the 3mf model from the geometry; see the console for details.");
+        }
+        return this->error();
     }
 
     // I think this is bogus at this point. We'll already have aborted if something has gone
@@ -596,7 +649,10 @@ SOP_Save3mf::cookMySop(OP_Context &context)
     // We've built the model (as an output string). Now save it to the file system.
     if ((myError = this->doOutput()) != SOP_Save3mf::ErrorCode::SUCCESS) {
         std::cerr << "Error: Unable to finish writing model to file. Error code was " << std::to_string(static_cast<int>(myError)) << std::endl;
-        return this->error(); // Same here XXX
+        if (this->lastSaveErrors.empty()) {
+            this->saveError("Unable to write the 3mf file " + this->filename + "; see the console for details.");
+        }
+        return this->error();
     }
 
     auto endTime = generateTimestamp();
@@ -667,18 +723,112 @@ SOP_Save3mf::save(void *data, int index, fpreal t, const PRM_Template *tplate)
 // Build the 3mf model from the Houdini geometry. To do this we run through the geometry and
 // put the information in 3mf format into a long string, which we'll later push to the model.model
 // file.
-// Note that we're currently saying the entire mesh is a single object for the purposes of
-// having a single objectId. This is a limitation we'll eventually address.
+// With Split into Objects off, the input's primitives are a single 3mf object, as in earlier versions. With it
+// on, they are divided into objects by the value of the Object Attribute, and each object gets its own build
+// item. With Allow Packed Instances on, each distinct packed geometry is written once, as an object, and each
+// packed primitive becomes a build item placing it. The colors and textures are written once, as resources all
+// the objects share.
 //
 SOP_Save3mf::ErrorCode
 SOP_Save3mf::buildModel(const GU_Detail* gdp) {
-    
+
     SOP_Save3mf::ErrorCode myError = SOP_Save3mf::ErrorCode::SUCCESS;
-    GA_Attribute *attrib;
+
+    bool hasPacked = false;
+    for (GA_Iterator it(gdp->getPrimitiveRange()); !it.atEnd(); ++it) {
+        if (GU_PrimPacked::isPackedPrimitive(gdp->getPrimitive(*it)->getTypeDef())) {
+            hasPacked = true;
+            break;
+        }
+    }
+
+    // geo is what the colors, textures and meshes are written from: the input itself, or with packed
+    // primitives, a detail holding the input's own primitives and those of each distinct packed geometry.
+    const GU_Detail* geo = gdp;
+    GU_Detail work;
+    std::vector<GA_Offset> topPrims;            // the input's own (unpacked) primitives, in geo
+    std::vector<ObjectPart> parts;              // topPrims divided into objects (Split into Objects)
+    int topId = 0;                              // id for topPrims as one object (0 = automatic)
+    std::string topName;                        // name for topPrims as one object
+    std::vector<PackedGeo> geos;                // distinct packed geometries
+    std::vector<PackedPlacement> placements;    // the input's packed primitives
+
+    if (hasPacked && this->allowPacked) {
+        if ((myError = this->gatherPacked(gdp, work, topPrims, parts, topId, topName, geos, placements))
+            != SOP_Save3mf::ErrorCode::SUCCESS) {
+            return myError;
+        }
+        geo = &work;
+    } else {
+        // Check the primitives before writing anything, so a problem gets a clear error on the node.
+        // (This is also where packed input without Allow Packed Instances stops.)
+        if ((myError = this->checkPrimitives(gdp, "")) != SOP_Save3mf::ErrorCode::SUCCESS) {
+            return myError;
+        }
+        topPrims = allPrims(gdp);
+        // Object ids from the Object Attribute must be 1 or greater.
+        if ((myError = this->checkObjectIds(gdp, topPrims, "")) != SOP_Save3mf::ErrorCode::SUCCESS) {
+            return myError;
+        }
+        if (this->splitObjects) {
+            if ((myError = this->gatherObjects(gdp, topPrims, parts)) != SOP_Save3mf::ErrorCode::SUCCESS) {
+                return myError;
+            }
+        }
+        if (parts.empty()) {
+            topId = this->singleObjectId(gdp, topPrims, "");
+            topName = this->singleObjectName(gdp, topPrims, "");
+        }
+    }
+
+    // Ids given by the Object Attribute must be unique: 3mf ids identify one resource each.
+    {
+        std::map<int, std::string> taken;
+        auto claim = [&](int id, const std::string& what) -> bool {
+            if (id <= 0) {
+                return true;
+            }
+            auto found = taken.find(id);
+            if (found != taken.end()) {
+                this->saveError("Object id " + std::to_string(id) + " (from the '" + this->objectAttrib
+                    + "' attribute) is used by both " + found->second + " and " + what
+                    + ", but 3mf object ids must be unique.");
+                return false;
+            }
+            taken[id] = what;
+            return true;
+        };
+        for (const ObjectPart &part : parts) {
+            if (!claim(part.fileId, "an object of the input")) {
+                return ErrorCode::BAD_GEO;
+            }
+        }
+        if (parts.empty() && !topPrims.empty() && !claim(topId, "the input's own primitives")) {
+            return ErrorCode::BAD_GEO;
+        }
+        for (const PackedGeo &g : geos) {
+            if (!claim(g.fileId, "a packed geometry")) {
+                return ErrorCode::BAD_GEO;
+            }
+        }
+        // Number every other resource after the largest id given.
+        for (const auto &entry : taken) {
+            if (entry.first >= this->resourceId) {
+                this->resourceId = entry.first + 1;
+            }
+        }
+    }
+    // The input as one object: its own id, or the usual fixed id when there are no packed geometries (so files
+    // without them come out as before), or else the next free id, which can't clash with theirs.
+    if (topId > 0) {
+        this->objectId = topId;
+    } else if (!geos.empty()) {
+        this->objectId = 0; // assigned below
+    } else if (this->objectId >= this->resourceId) {
+        this->resourceId = this->objectId + 1;
+    }
 
     // Set up the remaining header information and push it to the string with writeHeader().
-    //std::string title = "Model Saved from Houdini: ";
-    //title.append(this->mesh);
     // So far we implement the material extension but not the boolean extension.
     // The production extension seems to be necessary for the UUIDs the spec requests.
     // writeHeader() initiates the model info pushed to our 3mf string modelOutput with
@@ -691,47 +841,88 @@ SOP_Save3mf::buildModel(const GU_Detail* gdp) {
     // We go through the model gathering texture information so that it can be written to
     // the front part of the 3mf file. We check for textures before colors in
     // case of base color textures, which we just treat as colors.
-    if ((myError = this->saveTextures(gdp)) != SOP_Save3mf::ErrorCode::SUCCESS) {
+    if ((myError = this->saveTextures(geo)) != SOP_Save3mf::ErrorCode::SUCCESS) {
         std::cerr << "Error: Unable to gather model texture information. Error code was "
             << std::to_string(static_cast<int>(myError)) << std::endl;
         return ErrorCode::BAD_GEO;
     }
-    // To print the dictionary for debugging, change false to this->degbug
-    //printPrimTextCoords(this->primTextCoords, false);
 
     // Now gather color information.
-    if ((myError = this->saveColors(gdp)) != SOP_Save3mf::ErrorCode::SUCCESS) {
+    if ((myError = this->saveColors(geo)) != SOP_Save3mf::ErrorCode::SUCCESS) {
         std::cerr << "Error: Unable to gather model color information. Error code was "
             << std::to_string(static_cast<int>(myError)) << std::endl;
         return ErrorCode::BAD_GEO;
     }
 
     // Create a default color group and color if needed.
-    this->defaultColor(gdp);
+    this->defaultColor(geo);
 
-    LOG_DEBUG(this->debug, "Writing mesh to " + this->mesh);
-    
-    // Now we collect the actual geometry information.
-    if (this->write3mfObjectMesh(gdp) != ErrorCode::SUCCESS) {
-        std::cerr << "Error: Unable to write out object mesh." << std::endl;
+    // Now we collect the actual geometry information. Objects come after the color and texture
+    // resources they refer to. items: the build items, as object id and transform.
+    std::vector<std::pair<int, std::string>> items;
+    if (!topPrims.empty() && parts.empty()) {
+        if (this->objectId <= 0) {
+            this->objectId = this->resourceId++;
+        }
+        LOG_DEBUG(this->debug, "Writing mesh to " + topName);
+        // Without packed primitives, the whole input as in earlier versions (prims null: every point).
+        const std::vector<GA_Offset>* which = (geo == gdp) ? nullptr : &topPrims;
+        if (this->write3mfObjectMesh(geo, this->objectId, topName, which) != ErrorCode::SUCCESS) {
+            std::cerr << "Error: Unable to write out object mesh." << std::endl;
+            return ErrorCode::BAD_GEO;
+        }
+        items.push_back({this->objectId, SOP_Save3mf::TRANSFORM_TRIVIAL});
+    }
+    for (const ObjectPart &part : parts) {
+        // An object keeps the id from its attribute if it has one; otherwise it takes the next free
+        // resource id, after the colors and textures.
+        int thisObjectId = part.fileId;
+        if (thisObjectId <= 0) {
+            thisObjectId = this->resourceId++;
+        }
+        LOG_DEBUG(this->debug, "Writing object " << thisObjectId << " (" << part.name << ") with "
+            << part.prims.size() << " primitives");
+        if (this->write3mfObjectMesh(geo, thisObjectId, part.name, &part.prims) != ErrorCode::SUCCESS) {
+            std::cerr << "Error: Unable to write out the mesh for object " << part.name << "." << std::endl;
+            return ErrorCode::BAD_GEO;
+        }
+        items.push_back({thisObjectId, SOP_Save3mf::TRANSFORM_TRIVIAL});
+    }
+    for (const PackedPlacement &placement : placements) {
+        if (placement.xform.determinant() < 0) {
+            int bakedId = 0;
+            if ((myError = this->writeMirrored(geo, geos, placement, bakedId)) != ErrorCode::SUCCESS) {
+                return myError;
+            }
+            if (bakedId > 0) {
+                items.push_back({bakedId, SOP_Save3mf::TRANSFORM_TRIVIAL});
+            }
+            continue;
+        }
+        if ((myError = this->writePackedGeo(geo, geos, placement.geo)) != ErrorCode::SUCCESS) {
+            return myError;
+        }
+        if (geos[placement.geo].objId > 0) {
+            items.push_back({geos[placement.geo].objId, transformString(placement.xform)});
+        }
+    }
+    if (items.empty()) {
+        this->saveError("There's no geometry to save.");
         return ErrorCode::BAD_GEO;
     }
-    
+
     // End of the model information
     this->modelOutput.append("</resources>\n");
 
-    // Write the build items -- build transforms, etc.
-    LOG_DEBUG(this->debug, "Writing build items");
-
+    // Write the build items -- build transforms, etc. Every object to print must be placed by an item, or
+    // it is ignored when the file is read back in.
+    LOG_DEBUG(this->debug, "Writing " << items.size() << " build items");
     std::string uuid_str = generatePseudoUUID();
     this->modelOutput.append("<build p:UUID=\"" + uuid_str + "\">\n");
-    // Put the item in the list of build items since the whole object needs to go
-    // there or it will be ignored when read back in.
-    if (this->write3mfItem(gdp, this->objectId) != ErrorCode::SUCCESS) {
-        std::cerr << "Error: Unable to write out object mesh." << std::endl;
-        return ErrorCode::BAD_GEO;
+    for (const auto &item : items) {
+        this->writeItem(item.first, item.second);
     }
-    
+
     // End of the build info and the whole model string.
     this->modelOutput.append("</build>\n");
     this->modelOutput.append("</model>\n");
@@ -755,24 +946,56 @@ SOP_Save3mf::buildModel(const GU_Detail* gdp) {
 // The flow in this routine gives texture priority over color if a triangle has both.
 // We do not attempt to do any blending of properties as seen in Houdini (yet).
 //
-// Since we're currently outputting everything as one object, there will be only one object. 
-// Since we're using an initial resource ID > 1 (see header file), we can safely assign
-// the value in the header file to this object id.
+// The object gets the id objId and the name objName. If prims is null the object holds every point and
+// primitive of the input, as in earlier versions; otherwise it holds just those primitives and the points
+// they use, renumbered from 0 since each 3mf object numbers its own vertices. Colors and texture
+// coordinates are looked up by the primitive's index in the whole input, so they need no renumbering.
+//
+// If xform is given, the points are written transformed by it (used for mirrored packed instances, which are
+// written as objects of their own). A transform with a negative determinant turns the mesh inside out, so
+// then the winding is reversed as well.
 //
 // Note that what 3mf calls vertices are Houdini points.
 //
 SOP_Save3mf::ErrorCode
-SOP_Save3mf::write3mfObjectMesh(const GU_Detail* gdp) {
+SOP_Save3mf::write3mfObjectMesh(const GU_Detail* gdp, int objId, const std::string& objName,
+    const std::vector<GA_Offset>* prims, const UT_Matrix4D* xform) {
     LOG_DEBUG(this->debug, "Entering write3mfObjectMesh");
-    if (gdp == nullptr) {
-        LOG_DEBUG(this->debug, "fooey");
-    }
+
+    // The winding to write: Flip Normals, reversed again for a mirroring transform. Texture coordinate
+    // indices were recorded in Flip Normals order (saveTextures), so they're swapped when this differs.
+    const bool mirrored = (xform != nullptr && xform->determinant() < 0);
+    const bool flipWinding = mirrored ? !this->flip : this->flip;
     //printPrimTextCoords(this->primTextCoords, this->debug);
+
+    // For a subset of the primitives: the points they use, in index order, and each one's new number.
+    std::vector<GA_Index> usedPoints;
+    std::unordered_map<GA_Index, int> localIndex;
+    if (prims != nullptr) {
+        for (GA_Offset primOffset : *prims) {
+            const GA_Primitive *primPtr = gdp->getPrimitive(primOffset);
+            for (GA_Size v = 0; v < primPtr->getVertexCount(); ++v) {
+                GA_Index ptIndex = primPtr->getPointIndex(v);
+                if (localIndex.find(ptIndex) == localIndex.end()) {
+                    localIndex[ptIndex] = -1; // Numbered below, once they're sorted
+                    usedPoints.push_back(ptIndex);
+                }
+            }
+        }
+        std::sort(usedPoints.begin(), usedPoints.end());
+        for (size_t i = 0; i < usedPoints.size(); ++i) {
+            localIndex[usedPoints[i]] = static_cast<int>(i);
+        }
+    }
+    // The number a point has in this object's vertex list
+    auto vertexNumber = [&](GA_Index ptIndex) -> int {
+        return (prims == nullptr) ? static_cast<int>(ptIndex) : localIndex[ptIndex];
+    };
 
     // First add the object string with default property info
     std::string uuid_str = generatePseudoUUID();
-    this->modelOutput.append("<object id=\"" + std::to_string(this->objectId));
-    this->modelOutput.append("\" name=\"" + this->mesh + "\" type=\"model\" pid=\"");
+    this->modelOutput.append("<object id=\"" + std::to_string(objId));
+    this->modelOutput.append("\" name=\"" + xmlEscape(objName) + "\" type=\"model\" pid=\"");
     this->modelOutput.append(std::to_string(this->defaultColorResource));
     this->modelOutput.append("\" pindex=\"0\" p:UUID=\"" + uuid_str + "\">\n");
 
@@ -781,35 +1004,46 @@ SOP_Save3mf::write3mfObjectMesh(const GU_Detail* gdp) {
     // write all the vertices (that's in 3mf lingo. They are points in Houdini lingo)
     this->modelOutput.append("  <vertices>\n");
 
-    GA_Size numPts = gdp->getNumPoints();
-    LOG_DEBUG(this->debug, "There are " + std::to_string(numPts) + " vertices");
-    //LOG_DEBUG(true, "There are " + std::to_string(numPts) + " vertices");
-    
-    for (GA_Iterator it(gdp->getPointRange()); !it.atEnd(); ++it) {
-        GA_Offset ptOffset = *it;
-        UT_Vector3 pos = gdp->getPos3(ptOffset);
-        {
-            std::stringstream st;
-            st << "    <vertex x=\"" << std::setw(3) << pos[0] << "\"";
-            st << " y=\"" << std::setw(3) << pos[1] << "\"";
-            //st << " z=\"" << std::setw(3) << pos[2] << "\"/>\n";
-            st << " z=\"" << std::setw(3) << pos[2] << "\"/>\n";
-            //st << std::hex << std::uppercase << std::setfill('0');
-            this->modelOutput.append(st.str());
+    auto writeVertex = [&](GA_Offset ptOffset) {
+        UT_Vector3D pos(gdp->getPos3(ptOffset));
+        if (xform != nullptr) {
+            pos = pos * (*xform);
+        }
+        std::stringstream st;
+        st << "    <vertex x=\"" << std::setw(3) << pos[0] << "\"";
+        st << " y=\"" << std::setw(3) << pos[1] << "\"";
+        st << " z=\"" << std::setw(3) << pos[2] << "\"/>\n";
+        this->modelOutput.append(st.str());
+    };
+    if (prims == nullptr) {
+        LOG_DEBUG(this->debug, "There are " + std::to_string(gdp->getNumPoints()) + " vertices");
+        for (GA_Iterator it(gdp->getPointRange()); !it.atEnd(); ++it) {
+            writeVertex(*it);
+        }
+    } else {
+        LOG_DEBUG(this->debug, "There are " + std::to_string(usedPoints.size()) + " vertices in this object");
+        for (GA_Index ptIndex : usedPoints) {
+            writeVertex(gdp->pointOffset(ptIndex));
         }
     }
 
     this->modelOutput.append("  </vertices>\n");
 
     // write all the triangles
-    GA_Size numPrims = gdp->getNumPrimitives();
-    LOG_DEBUG(this->debug, "In write we have " << numPrims << " primitives.");
-    //LOG_DEBUG(true, "In write we have " << numPrims << " primitives.");
     this->modelOutput.append("  <triangles>\n");
 
+    // The primitives to write: all of them, or the given ones
+    std::vector<GA_Offset> allPrims;
+    if (prims == nullptr) {
+        for (GA_Iterator it(gdp->getPrimitiveRange()); !it.atEnd(); ++it) {
+            allPrims.push_back(*it);
+        }
+    }
+    const std::vector<GA_Offset> &primList = (prims == nullptr) ? allPrims : *prims;
+    LOG_DEBUG(this->debug, "In write we have " << primList.size() << " primitives.");
+
     //printPrimTextCoords(this->primTextCoords, this->debug);
-    for (GA_Iterator it(gdp->getPrimitiveRange()); !it.atEnd(); ++it) {
-      GA_Offset primOffset = *it;
+    for (GA_Offset primOffset : primList) {
       const GA_Primitive *primPtr = gdp->getPrimitive(primOffset);
       GA_Index primIndex = gdp->primitiveIndex(primOffset);
 
@@ -823,16 +1057,14 @@ SOP_Save3mf::write3mfObjectMesh(const GU_Detail* gdp) {
             return ErrorCode::BAD_GEO;
         }
         LOG_DEBUG(false, std::string("We got ") + std::to_string(numVerts) + std::string(" vertices for this prim"));
-        const GA_OffsetListRef vertices = gdp->getPrimitiveVertexList(it.getOffset());
-        //LOG_DEBUG(this->debug, "Another way to see it -- we have " + std::to_string(vertices.size()) + " vertices in this prim");
         std::array<int, 3> myPoints;
-        myPoints[1] = primPtr->getPointIndex(1);
-        if (this->flip) {
-            myPoints[0] = primPtr->getPointIndex(2);
-            myPoints[2] = primPtr->getPointIndex(0);
+        myPoints[1] = vertexNumber(primPtr->getPointIndex(1));
+        if (flipWinding) {
+            myPoints[0] = vertexNumber(primPtr->getPointIndex(2));
+            myPoints[2] = vertexNumber(primPtr->getPointIndex(0));
         } else {
-            myPoints[0] = primPtr->getPointIndex(0);
-            myPoints[2] = primPtr->getPointIndex(2);
+            myPoints[0] = vertexNumber(primPtr->getPointIndex(0));
+            myPoints[2] = vertexNumber(primPtr->getPointIndex(2));
         }
         LOG_DEBUG(false, "    My points in order are " + std::to_string(myPoints[0]) + ", "
             + std::to_string(myPoints[1]) + ", " + std::to_string(myPoints[2]));
@@ -846,6 +1078,9 @@ SOP_Save3mf::write3mfObjectMesh(const GU_Detail* gdp) {
                 //+ std::to_string(primTextCoords[primIndex][1]) + std::string(" ")
                 //+ std::to_string(primTextCoords[primIndex][2]));
             std::array<int, 3> textCoordIndices = this->primTextCoords[primIndex];
+            if (mirrored) {
+                std::swap(textCoordIndices[0], textCoordIndices[2]); // see flipWinding above
+            }
             st << "    <triangle v1=\"" << std::to_string(myPoints[0]) << "\" v2=\""
                 << std::to_string(myPoints[1]) + "\" v3=\"" << std::to_string(myPoints[2])
                 << "\" pid=\"" << std::to_string(textGroupId)
@@ -871,7 +1106,7 @@ SOP_Save3mf::write3mfObjectMesh(const GU_Detail* gdp) {
                     int i1 = getColorIndex(this->colorsByGroup[this->colorgroupId], primIndex, 0);
                     int i2 = getColorIndex(this->colorsByGroup[this->colorgroupId], primIndex, 1);
                     int i3 = getColorIndex(this->colorsByGroup[this->colorgroupId], primIndex, 2);
-                    if (this->flip) {
+                    if (flipWinding) {
                         int tmp = i1;
                         i1 = i3;
                         i3 = tmp;
@@ -895,7 +1130,7 @@ SOP_Save3mf::write3mfObjectMesh(const GU_Detail* gdp) {
                     int i1 = getColorIndex(this->colorsByGroup[this->colorgroupId], primIndex, 0);
                     int i2 = getColorIndex(this->colorsByGroup[this->colorgroupId], primIndex, 1);
                     int i3 = getColorIndex(this->colorsByGroup[this->colorgroupId], primIndex, 2);
-                    if (this->flip) {
+                    if (flipWinding) {
                         int tmp = i1;
                         i1 = i3;
                         i3 = tmp;
@@ -963,6 +1198,576 @@ SOP_Save3mf::write3mfItem(const GU_Detail* gdp, int objectId) {
 
     LOG_DEBUG(this->debug, "Exiting write3mfItem");
     return ErrorCode::SUCCESS;
+}
+
+
+//
+// Put an error or warning from a save on the node, and remember it. Houdini clears a node's messages at the
+// start of every cook, and the node usually cooks again soon after a save, so showLastSaveMessages() puts
+// them back on each cook that doesn't save, until the next save.
+//
+void
+SOP_Save3mf::saveError(const std::string& message) {
+    this->addError(SOP_MESSAGE, message.c_str());
+    this->lastSaveErrors.push_back(message);
+}
+
+void
+SOP_Save3mf::saveWarning(const std::string& message) {
+    // The same warning can come up for several objects; show it once.
+    for (const std::string& existing : this->lastSaveWarnings) {
+        if (existing == message) {
+            return;
+        }
+    }
+    this->addWarning(SOP_MESSAGE, message.c_str());
+    this->lastSaveWarnings.push_back(message);
+}
+
+void
+SOP_Save3mf::showLastSaveMessages() {
+    for (const std::string& message : this->lastSaveErrors) {
+        this->addWarning(SOP_MESSAGE, ("The last save failed: " + message).c_str());
+    }
+    for (const std::string& message : this->lastSaveWarnings) {
+        this->addWarning(SOP_MESSAGE, message.c_str());
+    }
+}
+
+
+//
+// All the primitives of a detail, as a list of offsets.
+//
+static std::vector<GA_Offset>
+allPrims(const GU_Detail* gdp) {
+    std::vector<GA_Offset> prims;
+    for (GA_Iterator it(gdp->getPrimitiveRange()); !it.atEnd(); ++it) {
+        prims.push_back(*it);
+    }
+    return prims;
+}
+
+
+//
+// Check that every primitive is a triangle, and put a clear error on the node if not. where says which
+// geometry this is in messages: empty for the input, or e.g. " inside a packed primitive". A packed primitive
+// has a single vertex and its triangles inside it, so it gets its own message.
+//
+SOP_Save3mf::ErrorCode
+SOP_Save3mf::checkPrimitives(const GU_Detail* gdp, const std::string& where) {
+    GA_Size numPacked = 0;
+    GA_Size numOther = 0;
+    GA_Index firstOther = -1;
+    GA_Size firstOtherVerts = 0;
+    for (GA_Iterator it(gdp->getPrimitiveRange()); !it.atEnd(); ++it) {
+        const GA_Primitive *primPtr = gdp->getPrimitive(*it);
+        if (GU_PrimPacked::isPackedPrimitive(primPtr->getTypeDef())) {
+            ++numPacked;
+        } else if (primPtr->getVertexCount() != 3) {
+            if (numOther == 0) {
+                firstOther = gdp->primitiveIndex(*it);
+                firstOtherVerts = primPtr->getVertexCount();
+            }
+            ++numOther;
+        }
+    }
+    if (numPacked > 0) {
+        std::string message = "The input contains " + std::to_string(numPacked)
+            + " packed primitive(s). Unpack them first, or turn on Allow Packed Instances.";
+        std::cerr << "Error: " << message << std::endl;
+        this->saveError(message);
+        return ErrorCode::BAD_GEO;
+    }
+    if (numOther > 0) {
+        std::string message = "3mf requires mesh faces to be triangles, but " + std::to_string(numOther)
+            + " primitive(s)" + where + " are not triangles. The first is primitive " + std::to_string(firstOther)
+            + ", with " + std::to_string(firstOtherVerts) + " vertices. Triangulate first, e.g. with a Divide SOP.";
+        std::cerr << "Error: " << message << std::endl;
+        this->saveError(message);
+        return ErrorCode::BAD_GEO;
+    }
+    return ErrorCode::SUCCESS;
+}
+
+
+//
+// The warning for a Mesh Name parameter that sets mesh_name attributes aside, as for Title and out_title.
+//
+void
+SOP_Save3mf::warnMeshNameIgnored() {
+    this->saveWarning("Mesh Name parameter is set, but a 'mesh_name' primitive attribute is also present on "
+        "the input geometry; the parameter value was used instead of the attribute. "
+        "Clear Mesh Name to use mesh_name.");
+}
+
+
+//
+// The name of one object made of the primitives prims: the Mesh Name parameter if it's set (with a warning if
+// that sets mesh_name attributes aside), otherwise the first non-empty mesh_name primitive attribute value.
+// One object can have only one name, so if the primitives carry several different names, the first is used,
+// with a warning. where is as for checkPrimitives().
+//
+std::string
+SOP_Save3mf::singleObjectName(const GU_Detail* gdp, const std::vector<GA_Offset>& prims, const std::string& where) {
+    GA_ROHandleS name_h(gdp, GA_ATTRIB_PRIMITIVE, "mesh_name");
+    std::string first;
+    bool several = false;
+    if (name_h.isValid()) {
+        for (GA_Offset off : prims) {
+            const UT_StringHolder &n = name_h.get(off);
+            if (!n.isstring()) {
+                continue;
+            }
+            if (first.empty()) {
+                first = n.toStdString();
+            } else if (first != n.toStdString()) {
+                several = true;
+                break;
+            }
+        }
+    }
+
+    if (!this->mesh.empty()) {
+        if (!first.empty()) {
+            this->warnMeshNameIgnored();
+        }
+        return this->mesh;
+    }
+    if (several) {
+        this->saveWarning("The primitives" + where + " have several different mesh_name values, but they were "
+            "saved as one object, which can have only one name; the first, '" + first + "', was used."
+            + (where.empty() ? " Turn on Split into Objects to keep them as separate objects." : ""));
+    }
+    return first;
+}
+
+
+//
+// For Split into Objects: divide the primitives prims into objects by the value of the Object Attribute, an
+// integer or string primitive attribute. Objects come in the order their first primitive appears. Each is
+// named as Title and the out_* attributes work: a non-empty Mesh Name parameter names every object (3mf object
+// names needn't be unique), with a warning if that sets aside mesh_name attributes. With Mesh Name empty, each
+// object takes the mesh_name attribute of its first primitive (Read3mf writes it), or no name. If the
+// Object Attribute is missing, everything goes in one object, with a warning, and parts is left empty.
+//
+SOP_Save3mf::ErrorCode
+SOP_Save3mf::gatherObjects(const GU_Detail* gdp, const std::vector<GA_Offset>& prims, std::vector<ObjectPart>& parts) {
+    parts.clear();
+
+    if (this->objectAttrib.empty()) {
+        this->saveWarning("Split into Objects is on but Object Attribute is empty, so everything "
+            "was saved as one object.");
+        return ErrorCode::SUCCESS;
+    }
+
+    GA_ROHandleS str_h(gdp, GA_ATTRIB_PRIMITIVE, this->objectAttrib.c_str());
+    GA_ROHandleI int_h(gdp, GA_ATTRIB_PRIMITIVE, this->objectAttrib.c_str());
+    if (!str_h.isValid() && !int_h.isValid()) {
+        std::string message = "Split into Objects is on, but there's no integer or string primitive attribute named '"
+            + this->objectAttrib + "', so everything was saved as one object.";
+        this->saveWarning(message);
+        return ErrorCode::SUCCESS;
+    }
+    GA_ROHandleS name_h(gdp, GA_ATTRIB_PRIMITIVE, "mesh_name");
+
+    const std::string &meshParm = this->mesh;  // The Mesh Name parameter
+    bool meshNameIgnored = false;              // a mesh_name attribute set aside because Mesh Name is set
+
+    std::map<std::string, size_t> partOfValue; // attribute value (as text) -> index into parts
+    for (GA_Offset primOffset : prims) {
+        std::string value;
+        if (str_h.isValid()) {
+            const UT_StringHolder &sv = str_h.get(primOffset);
+            value = sv.isstring() ? sv.toStdString() : std::string();
+        } else {
+            value = std::to_string(int_h.get(primOffset));
+        }
+
+        auto found = partOfValue.find(value);
+        if (found == partOfValue.end()) {
+            ObjectPart part;
+            std::string attrName;
+            if (name_h.isValid()) {
+                const UT_StringHolder &n = name_h.get(primOffset);
+                if (n.isstring()) {
+                    attrName = n.toStdString();
+                }
+            }
+            if (!meshParm.empty()) {
+                part.name = meshParm;
+                if (!attrName.empty()) {
+                    meshNameIgnored = true;
+                }
+            } else if (!attrName.empty()) {
+                part.name = attrName;
+            }
+            partOfValue[value] = parts.size();
+            parts.push_back(part);
+            found = partOfValue.find(value);
+        }
+        parts[found->second].prims.push_back(primOffset);
+    }
+
+    // As for Title and out_title: say so when the parameter sets an attribute aside.
+    if (meshNameIgnored) {
+        this->warnMeshNameIgnored();
+    }
+
+    // With an integer attribute, keep its values as the objects' ids in the file, so a file read by Read3mf
+    // (which sets object_id from them) is saved back with the same ids. checkObjectIds() has already made sure
+    // they're all 1 or greater. 3mf ids must be unique among all resources, so buildModel() numbers the colors
+    // and textures after the largest of them. With a string attribute the objects are numbered automatically.
+    if (int_h.isValid() && !str_h.isValid()) {
+        for (ObjectPart &part : parts) {
+            part.fileId = int_h.get(part.prims.front());
+        }
+    }
+
+    LOG_DEBUG(this->debug, "Split into " << parts.size() << " objects by attribute " << this->objectAttrib);
+    return ErrorCode::SUCCESS;
+}
+
+
+//
+// If the Object Attribute is an integer primitive attribute, check that its values on the primitives prims can
+// be 3mf ids, which must be 1 or greater. If not, put an error on the node naming the first bad value. Applies
+// with Split into Objects on or off, since the values become ids either way. where is as for checkPrimitives().
+//
+SOP_Save3mf::ErrorCode
+SOP_Save3mf::checkObjectIds(const GU_Detail* gdp, const std::vector<GA_Offset>& prims, const std::string& where) {
+    if (this->objectAttrib.empty()) {
+        return ErrorCode::SUCCESS;
+    }
+    GA_ROHandleS str_h(gdp, GA_ATTRIB_PRIMITIVE, this->objectAttrib.c_str());
+    GA_ROHandleI int_h(gdp, GA_ATTRIB_PRIMITIVE, this->objectAttrib.c_str());
+    if (str_h.isValid() || !int_h.isValid()) {
+        return ErrorCode::SUCCESS; // A string attribute or none: objects are numbered automatically
+    }
+    for (GA_Offset off : prims) {
+        int value = int_h.get(off);
+        if (value <= 0) {
+            std::string message = "The '" + this->objectAttrib + "' attribute is " + std::to_string(value)
+                + " on primitive " + std::to_string(gdp->primitiveIndex(off)) + where + ", but 3mf object ids "
+                "must be 1 or greater. Change the values (e.g. add 1), or delete the attribute to have the objects "
+                "numbered automatically.";
+            std::cerr << "Error: " << message << std::endl;
+            this->saveError(message);
+            return ErrorCode::BAD_GEO;
+        }
+    }
+    return ErrorCode::SUCCESS;
+}
+
+
+//
+// The id of one object made of the primitives prims: the Object Attribute's value on the first of them, if
+// it's an integer attribute, otherwise 0 (meaning: number it automatically). One object can have only one id,
+// so if the primitives carry several different values, the first is used, with a warning.
+//
+int
+SOP_Save3mf::singleObjectId(const GU_Detail* gdp, const std::vector<GA_Offset>& prims, const std::string& where) {
+    if (this->objectAttrib.empty() || prims.empty()) {
+        return 0;
+    }
+    GA_ROHandleS str_h(gdp, GA_ATTRIB_PRIMITIVE, this->objectAttrib.c_str());
+    GA_ROHandleI int_h(gdp, GA_ATTRIB_PRIMITIVE, this->objectAttrib.c_str());
+    if (str_h.isValid() || !int_h.isValid()) {
+        return 0;
+    }
+    int first = int_h.get(prims.front());
+    for (GA_Offset off : prims) {
+        if (int_h.get(off) != first) {
+            this->saveWarning("The primitives" + where + " have several different '" + this->objectAttrib
+                + "' values, but they were saved as one object, which can have only one id; the first, "
+                + std::to_string(first) + ", was used."
+                + (where.empty() ? " Turn on Split into Objects to keep them as separate objects." : ""));
+            break;
+        }
+    }
+    return first;
+}
+
+
+//
+// A 3mf transform attribute value from a Houdini matrix. Both use row vectors, so the 3mf matrix is the
+// Houdini one without its last column: m00 m01 m02 m10 m11 m12 m20 m21 m22 m30 m31 m32.
+//
+static std::string
+transformString(const UT_Matrix4D& m) {
+    std::stringstream st;
+    st << std::setprecision(10);
+    for (int row = 0; row < 4; ++row) {
+        for (int col = 0; col < 3; ++col) {
+            if (row != 0 || col != 0) {
+                st << " ";
+            }
+            double v = m(row, col);
+            st << (std::abs(v) < 1e-12 ? 0.0 : v); // no "-0" or 1e-17 noise
+        }
+    }
+    return st.str();
+}
+
+
+//
+// Write a build item placing the object objId with the transform xform (3mf form, see transformString()).
+//
+void
+SOP_Save3mf::writeItem(int objId, const std::string& xform) {
+    std::string uuid_str = generatePseudoUUID();
+    this->modelOutput.append(" <item objectid=\"" + std::to_string(objId) + "\" transform=\"" + xform
+        + "\" p:UUID=\"" + uuid_str + "\"/>\n");
+}
+
+
+//
+// Allow Packed Instances: take the input apart into
+//  - work: one detail holding the input's own (unpacked) primitives first, then the primitives of each distinct
+//    packed geometry, so the existing color, texture and mesh code can run over all of them at once;
+//  - topPrims: the input's own primitives, as offsets in work, split into topParts if Split into Objects is on;
+//  - geos: one entry per distinct packed geometry (instances share one), with its primitives in work and the
+//    packed primitives inside it (packs inside packs, written as components);
+//  - placements: the input's packed primitives, each a geometry and its full transform (one build item each).
+// Ids and names are worked out from each geometry's own attributes before merging, since merging fills in
+// default values (e.g. object_id 0) for geometries that don't have an attribute. Attributes on the packed
+// primitives themselves are not used.
+//
+SOP_Save3mf::ErrorCode
+SOP_Save3mf::gatherPacked(const GU_Detail* input, GU_Detail& work, std::vector<GA_Offset>& topPrims,
+    std::vector<ObjectPart>& topParts, int& topId, std::string& topName,
+    std::vector<PackedGeo>& geos, std::vector<PackedPlacement>& placements) {
+
+    std::map<const GU_Detail*, size_t> geoIndex;    // distinct packed geometry -> index into geos
+    ErrorCode err = ErrorCode::SUCCESS;
+
+    // Colors set on the packed primitives (or their points) can't be written: in 3mf, colors belong to the mesh,
+    // so every placement of one object looks the same.
+    if (GA_ROHandleV3(input, GA_ATTRIB_PRIMITIVE, "Cd").isValid() || GA_ROHandleV3(input, GA_ATTRIB_POINT, "Cd").isValid()) {
+        this->saveWarning("The input has a Cd attribute. Colors on the packed primitives themselves (or their "
+            "points) aren't written: 3mf colors belong to each object's mesh, so all instances of an object look "
+            "the same. Only colors inside the packed geometry are used.");
+    }
+
+    // Copy a detail without its packed primitives, recording each one's geometry and transform; check and
+    // analyze what's left; then append it to work. Returns the new primitives' offsets in work.
+    std::function<ErrorCode(const GU_Detail*, bool, int, std::vector<GA_Offset>&, std::vector<PackedPlacement>&,
+        std::vector<ObjectPart>*, int*, std::string*)> addDetail;
+
+    std::function<ErrorCode(const GU_Detail*, int, size_t&)> addGeo =
+        [&](const GU_Detail* src, int depth, size_t& index) -> ErrorCode {
+        auto found = geoIndex.find(src);
+        if (found != geoIndex.end()) {
+            index = found->second;
+            return ErrorCode::SUCCESS;
+        }
+        index = geos.size();
+        geoIndex[src] = index;
+        geos.push_back(PackedGeo());
+        std::vector<GA_Offset> prims;
+        std::vector<PackedPlacement> children;
+        int fileId = 0;
+        std::string name;
+        ErrorCode e = addDetail(src, false, depth, prims, children, nullptr, &fileId, &name);
+        if (e != ErrorCode::SUCCESS) {
+            return e;
+        }
+        // geos may have grown (and moved) during the recursion, so index it afresh.
+        geos[index].prims = prims;
+        geos[index].children = children;
+        geos[index].fileId = fileId;
+        geos[index].name = name;
+        return ErrorCode::SUCCESS;
+    };
+
+    addDetail = [&](const GU_Detail* src, bool isInput, int depth, std::vector<GA_Offset>& primsOut,
+        std::vector<PackedPlacement>& placementsOut, std::vector<ObjectPart>* partsOut, int* idOut,
+        std::string* nameOut) -> ErrorCode {
+        if (depth > 32) {
+            this->saveError("Packed primitives are nested more than 32 levels deep; unpack some of them first.");
+            return ErrorCode::BAD_GEO;
+        }
+        const std::string where = isInput ? std::string() : std::string(" inside a packed primitive");
+
+        GU_Detail tmp;
+        tmp.duplicate(*src);
+        std::vector<GA_Offset> packedOffsets;
+        for (GA_Iterator it(tmp.getPrimitiveRange()); !it.atEnd(); ++it) {
+            const GA_Primitive *primPtr = tmp.getPrimitive(*it);
+            if (!GU_PrimPacked::isPackedPrimitive(primPtr->getTypeDef())) {
+                continue;
+            }
+            const GU_PrimPacked *packed = static_cast<const GU_PrimPacked *>(primPtr);
+            GU_ConstDetailHandle handle = packed->getPackedDetail();
+            if (!handle.isValid() || handle.gdp() == nullptr) {
+                this->saveError("A packed primitive" + where + " is of a kind Save3mf can't read ("
+                    + primPtr->getTypeDef().getToken().toStdString() + "). Unpack it first.");
+                return ErrorCode::BAD_GEO;
+            }
+            this->packedHandles.push_back(handle); // keeps the geometry alive while we use its address
+            size_t childIndex = 0;
+            ErrorCode e = addGeo(handle.gdp(), depth + 1, childIndex);
+            if (e != ErrorCode::SUCCESS) {
+                return e;
+            }
+            PackedPlacement placement;
+            placement.geo = childIndex;
+            packed->getFullTransform4(placement.xform);
+            placementsOut.push_back(placement);
+            packedOffsets.push_back(*it);
+        }
+        for (GA_Offset off : packedOffsets) {
+            tmp.destroyPrimitiveOffset(off, true);
+        }
+
+        // What's left must be triangles, with usable ids; work out the object(s) it makes.
+        {
+            ErrorCode e = this->checkPrimitives(&tmp, where);
+            if (e != ErrorCode::SUCCESS) {
+                return e;
+            }
+            std::vector<GA_Offset> tmpPrims = allPrims(&tmp);
+            e = this->checkObjectIds(&tmp, tmpPrims, where);
+            if (e != ErrorCode::SUCCESS) {
+                return e;
+            }
+            std::vector<ObjectPart> tmpParts;
+            if (partsOut != nullptr && this->splitObjects && !tmpPrims.empty()) {
+                e = this->gatherObjects(&tmp, tmpPrims, tmpParts);
+                if (e != ErrorCode::SUCCESS) {
+                    return e;
+                }
+            }
+            if (tmpParts.empty() && !tmpPrims.empty()) {
+                if (idOut != nullptr) {
+                    *idOut = this->singleObjectId(&tmp, tmpPrims, where);
+                }
+                if (nameOut != nullptr) {
+                    *nameOut = this->singleObjectName(&tmp, tmpPrims, where);
+                }
+            }
+
+            // Append to work. Merging appends the primitives in order, so primitive i of tmp becomes
+            // primitive first + i of work.
+            GA_Index first = work.getNumPrimitives();
+            work.merge(tmp);
+            for (GA_Offset off : tmpPrims) {
+                primsOut.push_back(work.primitiveOffset(first + tmp.primitiveIndex(off)));
+            }
+            if (partsOut != nullptr) {
+                for (ObjectPart &part : tmpParts) {
+                    for (GA_Offset &off : part.prims) {
+                        off = work.primitiveOffset(first + tmp.primitiveIndex(off));
+                    }
+                }
+                *partsOut = tmpParts;
+            }
+        }
+        return ErrorCode::SUCCESS;
+    };
+
+    err = addDetail(input, true, 0, topPrims, placements, &topParts, &topId, &topName);
+    return err;
+}
+
+
+//
+// Write the object(s) for packed geometry i, after the ones it refers to: a mesh object for its own
+// primitives, and, if it contains packed primitives, a components object holding that mesh and one component
+// per packed primitive. A mirrored placement (negative determinant) turns a mesh inside out, so it is written
+// as a mesh object of its own with the transform applied and the winding corrected, placed with no transform.
+//
+SOP_Save3mf::ErrorCode
+SOP_Save3mf::writePackedGeo(const GU_Detail* work, std::vector<PackedGeo>& geos, size_t i) {
+    if (geos[i].written) {
+        return ErrorCode::SUCCESS;
+    }
+    geos[i].written = true;
+
+    for (const PackedPlacement &child : geos[i].children) {
+        if (child.xform.determinant() >= 0) {
+            ErrorCode e = this->writePackedGeo(work, geos, child.geo);
+            if (e != ErrorCode::SUCCESS) {
+                return e;
+            }
+        }
+    }
+
+    PackedGeo &geo = geos[i];
+    bool hasChildren = !geo.children.empty();
+    if (!geo.prims.empty()) {
+        if (geo.fileId > 0 && !hasChildren) {
+            geo.meshObjId = geo.fileId;
+        } else {
+            geo.meshObjId = this->resourceId++;
+        }
+        ErrorCode e = this->write3mfObjectMesh(work, geo.meshObjId, geo.name, &geo.prims);
+        if (e != ErrorCode::SUCCESS) {
+            return e;
+        }
+    }
+    if (!hasChildren) {
+        geo.objId = geo.meshObjId; // 0 for an empty geometry, which is then skipped
+        return ErrorCode::SUCCESS;
+    }
+
+    // Components: mirrored children first get their own baked mesh objects.
+    std::vector<std::pair<int, std::string>> components; // object id, transform
+    if (geo.meshObjId > 0) {
+        components.push_back({geo.meshObjId, SOP_Save3mf::TRANSFORM_TRIVIAL});
+    }
+    for (const PackedPlacement &child : geos[i].children) {
+        if (child.xform.determinant() < 0) {
+            int bakedId = 0;
+            ErrorCode e = this->writeMirrored(work, geos, child, bakedId);
+            if (e != ErrorCode::SUCCESS) {
+                return e;
+            }
+            if (bakedId > 0) {
+                components.push_back({bakedId, SOP_Save3mf::TRANSFORM_TRIVIAL});
+            }
+        } else if (geos[child.geo].objId > 0) {
+            components.push_back({geos[child.geo].objId, transformString(child.xform)});
+        }
+    }
+
+    PackedGeo &g = geos[i];
+    g.objId = (g.fileId > 0) ? g.fileId : this->resourceId++;
+    std::string uuid_str = generatePseudoUUID();
+    this->modelOutput.append("<object id=\"" + std::to_string(g.objId) + "\" name=\"" + xmlEscape(g.name)
+        + "\" type=\"model\" p:UUID=\"" + uuid_str + "\">\n");
+    this->modelOutput.append(" <components>\n");
+    for (const auto &component : components) {
+        this->modelOutput.append("  <component objectid=\"" + std::to_string(component.first) + "\" transform=\""
+            + component.second + "\" p:UUID=\"" + generatePseudoUUID() + "\"/>\n");
+    }
+    this->modelOutput.append(" </components>\n");
+    this->modelOutput.append("</object>\n");
+    return ErrorCode::SUCCESS;
+}
+
+
+//
+// A mirrored placement of a packed geometry: write the geometry as a mesh object of its own, with the
+// placement's transform applied to its points and the winding corrected. Only for a geometry without packed
+// primitives inside it. bakedId is the new object's id, or 0 for an empty geometry.
+//
+SOP_Save3mf::ErrorCode
+SOP_Save3mf::writeMirrored(const GU_Detail* work, std::vector<PackedGeo>& geos, const PackedPlacement& placement,
+    int& bakedId) {
+    bakedId = 0;
+    const PackedGeo &geo = geos[placement.geo];
+    if (!geo.children.empty()) {
+        this->saveError("A packed primitive with a mirroring transform (negative scale) contains packed "
+            "primitives itself, which Save3mf can't write. Unpack it first.");
+        return ErrorCode::BAD_GEO;
+    }
+    if (geo.prims.empty()) {
+        return ErrorCode::SUCCESS;
+    }
+    this->saveWarning("Some packed primitives have mirroring transforms (negative scale). Each was written as an "
+        "object of its own with the mirroring applied, since a mirrored instance would turn its mesh inside out.");
+    bakedId = this->resourceId++;
+    return this->write3mfObjectMesh(work, bakedId, geo.name, &geo.prims, &placement.xform);
 }
 
 
@@ -1630,7 +2435,7 @@ SOP_Save3mf::writeHeader(bool material_ext, bool boolean_ext, bool production_ex
     this->modelOutput.append(">\n");
     if (!this->title.empty()) {
         this->modelOutput.append("<metadata name=\"Title\">");
-        this->modelOutput.append(this->title);
+        this->modelOutput.append(xmlEscape(this->title));
         this->modelOutput.append("</metadata>\n");
     }
     this->modelOutput.append("<metadata name=\"Application\">");
@@ -1639,12 +2444,12 @@ SOP_Save3mf::writeHeader(bool material_ext, bool boolean_ext, bool production_ex
     this->modelOutput.append("</metadata>\n");
     if (!this->description.empty()) {
         this->modelOutput.append("<metadata name=\"Description\">");
-        this->modelOutput.append(this->description);
+        this->modelOutput.append(xmlEscape(this->description));
         this->modelOutput.append("</metadata>\n");
     }
     if (!this->designer.empty()) {
         this->modelOutput.append("<metadata name=\"Designer\">");
-        this->modelOutput.append(this->designer);
+        this->modelOutput.append(xmlEscape(this->designer));
         this->modelOutput.append("</metadata>\n");
     }
     this->modelOutput.append("<metadata name=\"ModificationDate\">");

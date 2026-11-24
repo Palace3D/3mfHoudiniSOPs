@@ -50,6 +50,9 @@
 #include <cmath> // for std::pow
 #include <cstdio> // for std::sscanf
 #include <cctype> // for std::tolower
+#include <cstdlib> // for std::strtol
+#include <functional>
+#include <memory>
 #include <algorithm> // for std::equal
 #include <filesystem>
 //#include <format> // This version of C++ is too old to use this, alas.
@@ -689,6 +692,216 @@ refersToOtherModelFile(const tinyxml2::XMLElement *element, const std::string &r
 
 
 //
+// The name of an element's Production Extension path attribute ("p:path" in nearly every file, but the prefix
+// is the file's choice), or an empty string if it has none.
+//
+static std::string
+productionPathAttributeName(const tinyxml2::XMLElement *element) {
+    for (const tinyxml2::XMLAttribute *attr = element->FirstAttribute(); attr; attr = attr->Next()) {
+        const char *colon = strrchr(attr->Name(), ':');
+        if (colon && strcmp(colon + 1, "path") == 0) {
+            return attr->Name();
+        }
+    }
+    return "";
+}
+
+
+//
+// A part name in a 3mf package as written, minus any leading slash: "/3D/Objects/object_1.model" gives
+// "3D/Objects/object_1.model", which is its path relative to the folder the package was unpacked into.
+//
+static std::string
+partRelativePath(const std::string &part) {
+    return (!part.empty() && part[0] == '/') ? part.substr(1) : part;
+}
+
+
+//
+// A part name as a lookup key. Part names are not case sensitive, so lower case, and without a leading slash.
+//
+static std::string
+partKey(const std::string &part) {
+    std::string key = partRelativePath(part);
+    std::transform(key.begin(), key.end(), key.begin(), [](unsigned char c) { return std::tolower(c); });
+    return key;
+}
+
+
+//
+// The model files, other than the root model file, that the root model file's components and build items refer
+// to through the Production Extension's path attribute, in the order they're first used, each listed once.
+//
+static void
+collectReferencedParts(tinyxml2::XMLElement *root, const std::string &rootModelPart, std::vector<std::string> &parts) {
+    std::unordered_set<std::string> seen;
+    auto note = [&](const tinyxml2::XMLElement *element) {
+        std::string otherFile;
+        if (refersToOtherModelFile(element, rootModelPart, otherFile) && seen.insert(partKey(otherFile)).second) {
+            parts.push_back(otherFile);
+        }
+    };
+    if (tinyxml2::XMLElement *resources = root->FirstChildElement("resources")) {
+        for (tinyxml2::XMLElement *object = resources->FirstChildElement("object"); object;
+             object = object->NextSiblingElement("object")) {
+            for (tinyxml2::XMLElement *components = object->FirstChildElement("components"); components;
+                 components = components->NextSiblingElement("components")) {
+                for (tinyxml2::XMLElement *component = components->FirstChildElement("component"); component;
+                     component = component->NextSiblingElement("component")) {
+                    note(component);
+                }
+            }
+        }
+    }
+    if (tinyxml2::XMLElement *build = root->FirstChildElement("build")) {
+        for (tinyxml2::XMLElement *item = build->FirstChildElement("item"); item; item = item->NextSiblingElement("item")) {
+            note(item);
+        }
+    }
+}
+
+
+//
+// The largest id of any resource (object, color group, texture, and so on) in a model file, or 0 if it has none.
+//
+static int
+largestResourceId(tinyxml2::XMLElement *root) {
+    int largest = 0;
+    if (tinyxml2::XMLElement *resources = root->FirstChildElement("resources")) {
+        for (tinyxml2::XMLElement *resource = resources->FirstChildElement(); resource;
+             resource = resource->NextSiblingElement()) {
+            int id = 0;
+            if (resource->QueryIntAttribute("id", &id) == tinyxml2::XML_SUCCESS && id > largest) {
+                largest = id;
+            }
+        }
+    }
+    return largest;
+}
+
+
+//
+// Every model file in a 3mf package numbers its resources on its own, so object 1 in a referenced model file and
+// object 1 in the root model file are different objects. The rest of Read3mf keeps one table of each kind of
+// resource, keyed by id, so before a referenced model file is read, give each of its resources a new id, starting
+// at nextId, that no other file uses, and change every reference to them inside that file to match: the "pid",
+// "texid", "objectid" and "matid" attributes, and each entry of a "pids" list. idMap gets old id -> new id. Each
+// object also gets a "read3mf_fileid" attribute holding the id it had in the file, so Read3mf can still report it.
+//
+// The Production Extension allows a component in a referenced model file to refer only to objects in that same
+// file, and a consumer MUST report an error for one that names another file. Returns false, with error set, for
+// that, and for a file that uses the same id twice. Unknown references are left alone for the usual checks.
+//
+static bool
+renumberResourceIds(tinyxml2::XMLElement *root, const std::string &part, int &nextId,
+                    std::unordered_map<int, int> &idMap, std::string &error) {
+    tinyxml2::XMLElement *resources = root->FirstChildElement("resources");
+    if (!resources) {
+        return true;
+    }
+
+    // New ids for the resources the file defines
+    for (tinyxml2::XMLElement *resource = resources->FirstChildElement(); resource;
+         resource = resource->NextSiblingElement()) {
+        int id = 0;
+        if (resource->QueryIntAttribute("id", &id) != tinyxml2::XML_SUCCESS) {
+            continue;
+        }
+        if (!idMap.emplace(id, nextId).second) {
+            error = "The model file '" + part + "' uses the resource id " + std::to_string(id) + " more than once.";
+            return false;
+        }
+        if (strcmp(resource->Name(), "object") == 0) {
+            resource->SetAttribute("read3mf_fileid", id);
+        }
+        resource->SetAttribute("id", nextId);
+        ++nextId;
+    }
+
+    auto newId = [&](const char *value, std::string &result) -> bool {
+        char *end = nullptr;
+        long id = std::strtol(value, &end, 10);
+        if (end == value || *end != '\0') {
+            return false;
+        }
+        auto it = idMap.find(static_cast<int>(id));
+        if (it == idMap.end()) {
+            return false;
+        }
+        result = std::to_string(it->second);
+        return true;
+    };
+
+    // Point every reference at the new ids. Walked without recursion, since a mesh can have millions of children.
+    std::vector<tinyxml2::XMLElement *> stack;
+    for (tinyxml2::XMLElement *resource = resources->FirstChildElement(); resource;
+         resource = resource->NextSiblingElement()) {
+        stack.push_back(resource);
+    }
+    std::vector<std::pair<std::string, std::string>> changes;
+    while (!stack.empty()) {
+        tinyxml2::XMLElement *element = stack.back();
+        stack.pop_back();
+
+        // Vertices hold only coordinates, so there's nothing to change in them
+        if (strcmp(element->Name(), "vertices") == 0) {
+            continue;
+        }
+
+        if (strcmp(element->Name(), "component") == 0) {
+            std::string pathName = productionPathAttributeName(element);
+            if (!pathName.empty()) {
+                const char *path = element->Attribute(pathName.c_str());
+                if (path && *path && partKey(path) != partKey(part)) {
+                    error = "The model file '" + part + "' has a component that refers to the model file '"
+                        + std::string(path) + "'. Only the root model file of a 3mf package may refer to other model "
+                        "files (3mf Production Extension), so this package is invalid.";
+                    return false;
+                }
+                element->DeleteAttribute(pathName.c_str()); // It names this file, so it adds nothing
+            }
+        }
+
+        changes.clear();
+        for (const tinyxml2::XMLAttribute *attr = element->FirstAttribute(); attr; attr = attr->Next()) {
+            const char *colon = strrchr(attr->Name(), ':');
+            const char *local = colon ? colon + 1 : attr->Name();
+            std::string replacement;
+            if (strcmp(local, "pid") == 0 || strcmp(local, "texid") == 0 || strcmp(local, "objectid") == 0
+                || strcmp(local, "matid") == 0) {
+                if (newId(attr->Value(), replacement)) {
+                    changes.emplace_back(attr->Name(), replacement);
+                }
+            } else if (strcmp(local, "pids") == 0) {
+                std::istringstream ids(attr->Value());
+                std::string id;
+                bool changed = false;
+                while (ids >> id) {
+                    std::string mapped;
+                    if (newId(id.c_str(), mapped)) {
+                        id = mapped;
+                        changed = true;
+                    }
+                    replacement += (replacement.empty() ? "" : " ") + id;
+                }
+                if (changed) {
+                    changes.emplace_back(attr->Name(), replacement);
+                }
+            }
+        }
+        for (const auto &[name, value] : changes) {
+            element->SetAttribute(name.c_str(), value.c_str());
+        }
+
+        for (tinyxml2::XMLElement *child = element->FirstChildElement(); child; child = child->NextSiblingElement()) {
+            stack.push_back(child);
+        }
+    }
+    return true;
+}
+
+
+//
 // The error text for a multiproperties layer whose resource is not a color group, base materials group, or
 // texture group, which are the only kinds we handle. In a valid file the usual culprit is a composite materials
 // group, so say so when that's what the layer uses (compositeIds holds the ids of the composite groups we saw).
@@ -1014,6 +1227,10 @@ SOP_Read3mf::clearData() {
     this->hasMulti = false;
     this->hasComp = false;
     this->compositeIds.clear();
+    this->matnetMade = false;
+    this->componentIds.clear();
+    this->overrideMade = false;
+    this->currentModelPart.clear();
     this->oldSaveColorsDecoded = false;
     this->unsupportedExtensions.clear();
     this->readWarnings.clear();
@@ -2218,6 +2435,7 @@ SOP_Read3mf::read(void *data, int index, fpreal t, const PRM_Template *tplate) {
         return me->error();
     }
 
+    me->rootModelPart = model_file; // The name inside the package, for spotting references to other model files
     std::filesystem::path the_model_path = std::filesystem::path(me->extractFolder) / model_file;
     std::string theModel = the_model_path.string();
     LOG_DEBUG(me->debug, "We have the model file including path as " << theModel);
@@ -2308,6 +2526,189 @@ SOP_Read3mf::getModelFile(std::string rels_path, std::string& model_file) {
 
 
 //
+// Report an error that stops a read, on the node and in the console.
+//
+void
+SOP_Read3mf::readError(const std::string &message) {
+    std::cerr << "Error: " << message << std::endl;
+    this->addError(SOP_MESSAGE, message.c_str());
+}
+
+
+//
+// Read the model files that the root model file refers to with the Production Extension's path attribute, on
+// components or build items. (Bambu Studio, for one, writes nearly every file this way: the root model file holds
+// only the build and a wrapper object, and the meshes live in files under 3D/Objects.) For each file:
+//   - load it, and check it uses the same unit as the root model file,
+//   - give its resources ids no other file uses (see renumberResourceIds()),
+//   - and hand its <model> element to handleModel, the reading pass's own code for a model file's resources.
+// The files are read before the root model file's resources, since its objects are built from theirs. Then the
+// root model file's references are pointed at the new ids and their path attributes removed, so the rest of the
+// pass sees one set of ids. Both passes (parseModelForSubnet() and parseModel()) call this, and the ids come out
+// the same both times. Each file is let go as soon as it has been read, since one can be very large.
+//
+// Build sections and metadata in referenced files are ignored, as the Production Extension requires.
+//
+SOP_Read3mf::ErrorCode
+SOP_Read3mf::processReferencedModels(tinyxml2::XMLElement *root,
+                                     const std::function<ErrorCode(tinyxml2::XMLElement *)> &handleModel) {
+    std::vector<std::string> parts;
+    collectReferencedParts(root, this->rootModelPart, parts);
+    if (parts.empty()) {
+        return ErrorCode::SUCCESS;
+    }
+
+    const char *rootUnitC = root->Attribute("unit");
+    const std::string rootUnit = rootUnitC ? rootUnitC : "millimeter";
+
+    int nextId = largestResourceId(root) + 1;
+    std::unordered_map<std::string, std::unordered_map<int, int>> idMaps; // key: partKey(), value: old id -> new id
+
+    for (const std::string &part : parts) {
+        LOG_DEBUG(this->debug, "Reading the referenced model file " << part);
+        const std::string relative = partRelativePath(part);
+
+        // A part name must stay inside the package
+        std::filesystem::path relativePath(relative);
+        for (const auto &piece : relativePath) {
+            if (piece == "..") {
+                this->readError("This file refers to the model file '" + part + "', which is outside the 3mf package.");
+                return ErrorCode::BAD_3MF;
+            }
+        }
+        const std::string diskPath = (std::filesystem::path(this->extractFolder) / relativePath).string();
+
+        auto doc = std::make_unique<tinyxml2::XMLDocument>();
+        tinyxml2::XMLError loaded = doc->LoadFile(diskPath.c_str());
+        if (loaded != tinyxml2::XML_SUCCESS) {
+            this->readError("Couldn't read the model file '" + part + "', which this file's objects are built from ("
+                + std::string(loaded == tinyxml2::XML_ERROR_FILE_NOT_FOUND ? "it isn't in the package"
+                    : doc->ErrorIDToName(loaded)) + ").");
+            return ErrorCode::XML_FAILURE;
+        }
+        tinyxml2::XMLElement *refRoot = doc->RootElement();
+        if (!refRoot || strcmp(refRoot->Name(), "model") != 0) {
+            this->readError("The model file '" + part + "' has no <model> element.");
+            return ErrorCode::BAD_3MF;
+        }
+
+        const char *unitC = refRoot->Attribute("unit");
+        const std::string unit = unitC ? unitC : "millimeter";
+        if (unit != rootUnit) {
+            this->readError("The model file '" + part + "' uses the unit '" + unit + "', but the root model file uses '"
+                + rootUnit + "'. Model files with different units are not currently supported.");
+            return ErrorCode::BAD_3MF;
+        }
+
+        std::string renumberError;
+        if (!renumberResourceIds(refRoot, part, nextId, idMaps[partKey(part)], renumberError)) {
+            this->readError(renumberError);
+            return ErrorCode::BAD_3MF;
+        }
+
+        // Extensions this file requires that we don't support count the same as the root model file's
+        std::string unsupported = unsupportedRequiredExtensions(refRoot);
+        if (!unsupported.empty() && this->unsupportedExtensions.find(unsupported) == std::string::npos) {
+            this->unsupportedExtensions += (this->unsupportedExtensions.empty() ? "" : "; ") + unsupported;
+        }
+
+        this->currentModelPart = "/" + relative;
+        ErrorCode err = handleModel(refRoot);
+        this->currentModelPart = "/" + partRelativePath(this->rootModelPart);
+        if (err != ErrorCode::SUCCESS) {
+            return err;
+        }
+    } // doc is let go here, before the next file is loaded
+
+    // Point the root model file's components and build items at the new ids
+    auto redirect = [&](tinyxml2::XMLElement *element, const char *what) -> bool {
+        std::string otherFile;
+        if (!refersToOtherModelFile(element, this->rootModelPart, otherFile)) {
+            return true;
+        }
+        int objectId = 0;
+        if (element->QueryIntAttribute("objectid", &objectId) != tinyxml2::XML_SUCCESS) {
+            return true; // handleComponent() and handleBuild() report a missing or bad object id
+        }
+        const auto &idMap = idMaps[partKey(otherFile)];
+        auto it = idMap.find(objectId);
+        if (it == idMap.end()) {
+            this->readError(std::string("A ") + what + " refers to object " + std::to_string(objectId) + " in the model file '"
+                + otherFile + "', but that file has no resource with that id.");
+            return false;
+        }
+        element->SetAttribute("objectid", it->second);
+        element->DeleteAttribute(productionPathAttributeName(element).c_str());
+        return true;
+    };
+    if (tinyxml2::XMLElement *resources = root->FirstChildElement("resources")) {
+        for (tinyxml2::XMLElement *object = resources->FirstChildElement("object"); object;
+             object = object->NextSiblingElement("object")) {
+            for (tinyxml2::XMLElement *components = object->FirstChildElement("components"); components;
+                 components = components->NextSiblingElement("components")) {
+                for (tinyxml2::XMLElement *component = components->FirstChildElement("component"); component;
+                     component = component->NextSiblingElement("component")) {
+                    if (!redirect(component, "component")) {
+                        return ErrorCode::BAD_3MF;
+                    }
+                }
+            }
+        }
+    }
+    if (tinyxml2::XMLElement *build = root->FirstChildElement("build")) {
+        for (tinyxml2::XMLElement *item = build->FirstChildElement("item"); item; item = item->NextSiblingElement("item")) {
+            if (!redirect(item, "build item")) {
+                return ErrorCode::BAD_3MF;
+            }
+        }
+    }
+    return ErrorCode::SUCCESS;
+}
+
+
+//
+// Look through a model file for the kinds of color resources it uses, and note them in hasColor and the rest.
+//
+void
+SOP_Read3mf::noteDecorFeatures(tinyxml2::XMLDocument *doc) {
+    if (this->geoOnly) {
+        return;
+    }
+    DecorFeatureVisitor visitor;
+    doc->Accept(&visitor);
+    this->hasColor = this->hasColor || visitor.hasColorGroups;
+    this->hasTexture = this->hasTexture || visitor.hasTextureGroups;
+    this->hasBase = this->hasBase || visitor.hasBaseMaterials;
+    this->hasMulti = this->hasMulti || visitor.hasMultiProperties;
+    this->hasComp = this->hasComp || visitor.hasCompositeMaterials;
+    LOG_DEBUG(this->debug, "Now we have hasColor: " << this->hasColor << " hasTexture: " << this->hasTexture
+        << " hasBase: " << this->hasBase << " hasMulti: " << this->hasMulti << " hasComp: " << this->hasComp);
+}
+
+
+//
+// Create the subnet and matnet for shaders, and the override shader, once they're needed. Called again as each
+// model file is read, since a referenced model file can bring the first texture or multiproperties.
+//
+void
+SOP_Read3mf::ensureMaterialNetwork() {
+    if (this->geoOnly) {
+        return;
+    }
+    if ((this->hasTexture || this->hasMulti) && !this->matnetMade) {
+        LOG_DEBUG(this->debug, "We have texture and/or multi-properties, so create the matnet");
+        this->matnetSetup();
+        this->matnetMade = true;
+    }
+    if (this->hasTexture && this->overrideShader && this->matnetMade && !this->overrideMade) {
+        LOG_DEBUG(this->debug, "We have texture, so also create the override shader node");
+        this->matnetOverrideSetup();
+        this->overrideMade = true;
+    }
+}
+
+
+//
 // Parse the 3mf model to build the Houdini geometry.
 //
 SOP_Read3mf::ErrorCode
@@ -2333,53 +2734,29 @@ SOP_Read3mf::parseModelForSubnet(std::string the_model) {
         std::string root_tag = root->Name(); 
         LOG_DEBUG(false, "Root Element Tag: " << root_tag);
 
-        LOG_DEBUG(this->debug, "Upon entry we have geoOnly: " << this->geoOnly << " hasColor: " << this->hasColor << " hasTexture: "
-            << this->hasTexture << " hasMulti: " << this->hasMulti);
+        this->currentModelPart = "/" + partRelativePath(this->rootModelPart);
 
-        // XXXXXX
         // Check first if we need to handle color, textures, multi-properties, etc. as we progress
-        if (!this->geoOnly) {
-            DecorFeatureVisitor visitor;
-            model_doc.Accept(&visitor);
+        this->noteDecorFeatures(&model_doc);
+        this->ensureMaterialNetwork();
 
-            if (visitor.hasColorGroups) {
-                this->hasColor = true;
-                LOG_DEBUG(this->debug, "Model has colors");
+        // Model files this one refers to come first, since its objects are built from theirs. With Only Geometry
+        // on, this pass does nothing with them, so they aren't loaded until the geometry pass.
+        ErrorCode refErr = this->geoOnly ? ErrorCode::SUCCESS
+            : this->processReferencedModels(root, [this](XMLElement *refRoot) {
+            this->noteDecorFeatures(refRoot->GetDocument());
+            this->ensureMaterialNetwork();
+            XMLElement *refResources = refRoot->FirstChildElement("resources");
+            if (refResources && this->handleResourcesForSubnet(refResources) != ErrorCode::SUCCESS) {
+                std::cerr << "Error: Failed to handle the resources section of a referenced model file." << std::endl;
+                return ErrorCode::BAD_3MF;
             }
-            if (visitor.hasTextureGroups) {
-                this->hasTexture = true;
-                LOG_DEBUG(this->debug, "Model has textures");
-            }
-            if (visitor.hasBaseMaterials) {
-                this->hasBase = true;
-                LOG_DEBUG(this->debug, "Model has basematerials");
-            }
-            if (visitor.hasMultiProperties) {
-                this->hasMulti = true;
-                LOG_DEBUG(this->debug, "Model has multi-properties");
-            }
-            if (visitor.hasCompositeMaterials) {
-                this->hasComp = true;
-                LOG_DEBUG(this->debug, "Model has compositeMaterials");
-            }
+            return ErrorCode::SUCCESS;
+        });
+        if (refErr != ErrorCode::SUCCESS) {
+            return refErr;
         }
-        LOG_DEBUG(this->debug, "After setting we have geoOnly: " << this->geoOnly << " hasColor: " << this->hasColor << " hasTexture: "
-            << this->hasTexture << " hasMulti: " << this->hasMulti);
 
-        if (!this->geoOnly && (this->hasTexture || this->hasMulti)) {
-            LOG_DEBUG(this->debug, "We have geoOnly false with texture and/or multi-properties");
-            this->matnetSetup(); // Get as far as creating the matnet
-        }
-        LOG_DEBUG(this->debug, "Now we have geoOnly: " << this->geoOnly << " hasColor: " << this->hasColor << " hasTexture: "
-            << this->hasTexture << " hasMulti: " << this->hasMulti);
-        if (!this->geoOnly && this->hasTexture && this->overrideShader) {
-            // XXXX
-            LOG_DEBUG(this->debug, "We have texture, so also create the override shader node");
-            this->matnetOverrideSetup();
-        }
-        LOG_DEBUG(this->debug, "After checking we have geoOnly: " << this->geoOnly << " hasColor: " << this->hasColor << " hasTexture: "
-            << this->hasTexture << " hasMulti: " << this->hasMulti);
-   
         for (XMLElement* descendant = root->FirstChildElement();
              descendant != nullptr;
              descendant = descendant->NextSiblingElement()) {
@@ -2468,6 +2845,20 @@ SOP_Read3mf::parseModel(std::string the_model) {
         LOG_DEBUG(this->debug, "Upon entry we have geoOnly: " << this->geoOnly << " hasColor: " << this->hasColor << " hasTexture: "
             << this->hasTexture << " hasMulti: " << this->hasMulti);
 
+        // Model files this one refers to come first, since its objects are built from theirs
+        this->currentModelPart = "/" + partRelativePath(this->rootModelPart);
+        ErrorCode refErr = this->processReferencedModels(root, [this](XMLElement *refRoot) {
+            XMLElement *refResources = refRoot->FirstChildElement("resources");
+            if (refResources && this->handleResources(refResources) != ErrorCode::SUCCESS) {
+                std::cerr << "Error: Failed to handle the resources section of a referenced model file." << std::endl;
+                return ErrorCode::BAD_3MF;
+            }
+            return ErrorCode::SUCCESS;
+        });
+        if (refErr != ErrorCode::SUCCESS) {
+            return refErr;
+        }
+
         // Parse Top-Level Child Nodes
         int num_resources = 0;
         int num_builds = 0;
@@ -2550,7 +2941,24 @@ SOP_Read3mf::parseModel(std::string the_model) {
         std::cerr << "Warning: " << oldSaveWarningText(this->importedApplication) << std::endl;
     }
 
-    // Process build list and merge into GDP
+    // Without build instructions, place every object that no other object uses as a component, once, as it is in
+    // its file. An object used as a component already comes in as part of each object that uses it, so placing it
+    // on its own too would duplicate its geometry.
+    if (!this->build) {
+        for (auto const& [objectID, objectData] : objectDict) {
+            if (this->componentIds.count(objectID) == 0) {
+                UT_Matrix4 transform;
+                transform.identity();
+                buildDict[objectID].push_back(transform);
+                LOG_DEBUG(false, "Without build instructions, placing object " << objectID);
+            }
+        }
+    }
+
+    // Process build list and merge into GDP. Each placed object's primitives are noted, so build_object_id can
+    // record which object they were placed as part of.
+    struct PlacedRange { GA_Offset start; GA_Offset end; int objectID; };
+    std::vector<PlacedRange> placedRanges;
     UT_Matrix4 scale_matrix(this->scale_factor);
     this->gdp->clearAndDestroy();
     for (auto const& [buildID, transformList] : buildDict) {
@@ -2584,13 +2992,30 @@ SOP_Read3mf::parseModel(std::string the_model) {
 */
         for (const UT_Matrix4& mat : transformList) {
             GA_Offset startOff = this->gdp->getNumPointOffsets();
+            GA_Offset startPrimOff = this->gdp->getNumPrimitiveOffsets();
             this->gdp->merge(*sourceGdp);
             GA_Offset endOff = this->gdp->getNumPointOffsets();
+            GA_Offset endPrimOff = this->gdp->getNumPrimitiveOffsets();
+            if (endPrimOff > startPrimOff) {
+                placedRanges.push_back({startPrimOff, endPrimOff, buildID});
+            }
             if (endOff > startOff) {
                 UT_Matrix4 finalMat(mat);
                 finalMat *= scale_matrix;
                 GA_Range newPoints(this->gdp->getPointMap(), startOff, endOff);
                 this->gdp->transform(finalMat, GA_Range(), newPoints, false);
+            }
+        }
+    }
+
+    // build_object_id: the object each primitive was placed as part of -- the object a build item names, or with
+    // build instructions off, the top-level object placed. It differs from object_id (the object whose mesh the
+    // primitive came from) for an object built from components, such as Bambu Studio's wrapper objects.
+    if (!placedRanges.empty()) {
+        GA_RWHandleI buildObjectIdHandle(this->gdp->addIntTuple(GA_ATTRIB_PRIMITIVE, "build_object_id", 1));
+        for (const PlacedRange &placed : placedRanges) {
+            for (GA_Iterator it(GA_Range(this->gdp->getPrimitiveMap(), placed.start, placed.end)); !it.atEnd(); ++it) {
+                buildObjectIdHandle.set(*it, placed.objectID);
             }
         }
     }
@@ -4272,8 +4697,7 @@ SOP_Read3mf::handleBuild(XMLElement* element) {
             std::string otherFile;
             if (refersToOtherModelFile(descendant, this->rootModelPart, otherFile)) {
                 std::string msg = "A build item refers to object " + std::to_string(objectID) + " in the model file '"
-                    + otherFile + "', but only the root model file of a 3mf package is currently read. Models split across "
-                    "several model files are not supported.";
+                    + otherFile + "', which wasn't read. This shouldn't happen; please report it with the file.";
                 std::cerr << "Error: " << msg << std::endl;
                 this->addError(SOP_MESSAGE, msg.c_str());
                 return ErrorCode::BAD_3MF;
@@ -4471,12 +4895,8 @@ SOP_Read3mf::handleObject(XMLElement* element) {
         objectDict[id] = data; // Store the ptr not the whole thing in case of resizing of the dictionary
         LOG_DEBUG(this->debug, "Created objectID entry for object " << id);
 
-        if (!this->build) { // We're not using build instructions so all objects go into the buildDict
-            UT_Matrix4 transform;
-            transform.identity();
-            buildDict[id].push_back(transform);
-            LOG_DEBUG(false, "Just inserted a transform for objectID " << id);
-        }
+        // Without build instructions, which objects get placed is decided once all of them have been read (see
+        // parseModel()), since only then do we know which ones are used as components of others.
         LOG_DEBUG(false, "This is a new object to us: " << id);
     } else {
         LOG_DEBUG(false, "We've seen this object before: " << id);
@@ -4630,12 +5050,22 @@ SOP_Read3mf::handleObject(XMLElement* element) {
 
 	    // Tag every primitive in this object with the 3mf object it came from,
 	    // so the information survives merging multiple objects into one gdp.
+	    // object_id is unique across the whole import. An object from a referenced model file was given a new id
+	    // (see renumberResourceIds()), so model_file and file_object_id say which file it came from and the id it
+	    // has there. For an object in the root model file, file_object_id is the same as object_id.
 	    GA_RWHandleI objectIdHandle(objGdp->addIntTuple(GA_ATTRIB_PRIMITIVE, "object_id", 1));
 	    GA_RWHandleS meshNameHandle(objGdp->addStringTuple(GA_ATTRIB_PRIMITIVE, "mesh_name", 1));
+	    GA_RWHandleS modelFileHandle(objGdp->addStringTuple(GA_ATTRIB_PRIMITIVE, "model_file", 1));
+	    GA_RWHandleI fileObjectIdHandle(objGdp->addIntTuple(GA_ATTRIB_PRIMITIVE, "file_object_id", 1));
 	    std::string thisMeshName = (name_cstr != nullptr) ? std::string(name_cstr) : std::string("");
+	    int fileObjectId = id;
+	    element->QueryIntAttribute("read3mf_fileid", &fileObjectId);
+	    UT_StringHolder thisModelFile(this->currentModelPart);
 	    for (GA_Iterator it(objGdp->getPrimitiveRange()); !it.atEnd(); ++it) {
     		objectIdHandle.set(*it, id);
     		meshNameHandle.set(*it, thisMeshName);
+    		modelFileHandle.set(*it, thisModelFile);
+    		fileObjectIdHandle.set(*it, fileObjectId);
 	    }
 
         } else if (tag_name == "metadatagroup") {
@@ -4745,7 +5175,8 @@ SOP_Read3mf::handleComponents(XMLElement* element, int parentID) {
 
 //
 // Parse an object that consists of other components, which are objects. This can be recursive.
-// We do not yet handle objects in other model files than the main one.
+// A component whose object is in another model file was pointed at that object's new id when the file was read
+// (see processReferencedModels()), so it's handled like any other.
 //
 SOP_Read3mf::ErrorCode
 SOP_Read3mf::handleComponent(XMLElement* element, int parentID) {
@@ -4764,14 +5195,14 @@ SOP_Read3mf::handleComponent(XMLElement* element, int parentID) {
         return ErrorCode::BAD_3MF;
     }
     LOG_DEBUG(false, "We got component object id " << id);
+    this->componentIds.insert(id); // So, without build instructions, it isn't placed a second time on its own
 
     // We only read the root model file. If the component's object is in another one, say so instead of
     // looking for that object id among the root file's objects, where it either isn't or is a different one.
     std::string otherFile;
     if (refersToOtherModelFile(element, this->rootModelPart, otherFile)) {
         std::string msg = "A component refers to object " + std::to_string(id) + " in the model file '" + otherFile
-            + "', but only the root model file of a 3mf package is currently read. Models split across several model files "
-            "are not supported.";
+            + "', which wasn't read. This shouldn't happen; please report it with the file.";
         std::cerr << "Error: " << msg << std::endl;
         this->addError(SOP_MESSAGE, msg.c_str());
         return ErrorCode::BAD_3MF;

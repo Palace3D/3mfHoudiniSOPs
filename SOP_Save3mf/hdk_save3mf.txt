@@ -13,15 +13,26 @@ the 3mf Core Specification and most of the 3mf Materials
 Specification. It supports per-point, per-vertex, per-primitive, and
 detail color, along with file-based and base-color textures.
 
-The whole input is currently written out as a single 3mf object.
+By default the whole input is written out as a single 3mf object.
+Turn on __Split into Objects__ to write one object per value of a
+primitive attribute instead, for example to save back the separate
+objects of a file read with [Node:sop/hdk_read3mf].
+
+Turn on __Allow Packed Instances__ to write packed primitives (for
+example from a Copy to Points with Pack and Instance on) as 3mf
+instances: each distinct packed geometry is written once, and each
+packed primitive places it with its own transform.
+
+The input must be triangles, including inside packed primitives.
+Problems stop the save with an error on the node; warnings from the
+last save stay on the node until the next one.
 
 TIP:
-    You can drive the Mesh Name, File Name, Title, Description, and
-    Designer from upstream data instead of typing them in by hand.
-    Add a Detail Wrangle before this node and set the string detail
-    attributes `out_mesh`, `out_filename`, `out_title`,
-    `out_description`, and `out_designer` to whatever your setup
-    computes. This lets you compute the strings directly in
+    You can drive the File Name, Title, Description, and Designer
+    from upstream data instead of typing them in by hand. Add a
+    Detail Wrangle before this node and set the string detail
+    attributes `out_filename`, `out_title`, `out_description`, and
+    `out_designer` to whatever your setup computes. This lets you compute the strings directly in
     VEX from the geometry's own attributes and content, rather than
     having to reference that data back through a parameter
     expression.
@@ -29,17 +40,23 @@ TIP:
     If you leave the corresponding parameter blank, the detail
     attribute is used. If you type a value directly into the
     parameter, that value always wins over the attribute, and the
-    node shows a warning saying the attribute was ignored. Mesh
-    Name, File Name, and Title have default values, so clear them to
-    use the attributes.
+    node shows a warning saying the attribute was ignored. File Name
+    and Title have default values, so clear them to use the
+    attributes.
 
     These mirror the `in_title`, `in_description`, and `in_designer`
     detail attributes that [Node:sop/hdk_read3mf] sets from a file's
     metadata. To keep a file's metadata when you read it and save it
     back, copy them across in a Detail Wrangle, for example
     `s@out_title = s@in_title;`.
-    (`out_meshname` also still works for the mesh name, for setups
-    made with earlier versions.)
+
+    Mesh names work the same way, except that a file can hold several
+    objects with different names, so they come from the `mesh_name`
+    primitive attribute instead of a detail attribute. That's the
+    attribute [Node:sop/hdk_read3mf] writes, so names come through a
+    read and save unchanged once Mesh Name is cleared. (Save3mf 3.1
+    and earlier read an `out_mesh` detail attribute instead; it is no
+    longer used. Set `s@mesh_name` in a Primitive Wrangle instead.)
 
 @parameters
 
@@ -95,9 +112,67 @@ Debug Files:
 
 Mesh Name:
     #id: mesh
-    Name given to the mesh inside the 3mf file. Overridden by the
-    `out_mesh` detail attribute if this is left blank — see the tip
-    above.
+    Name given to the mesh inside the 3mf file. If this isn't empty
+    it names every object, and any `mesh_name` primitive attribute is
+    ignored, with a warning. Clear it to use `mesh_name` instead — see
+    the tip above. With __Split into Objects__ off, all the primitives
+    become one object, which can have only one name: if they carry
+    several different `mesh_name` values, the first is used, with a
+    warning.
+
+Split into Objects:
+    #id: splitObjects
+    Write one 3mf object for each value of the __Object Attribute__,
+    each with its own build item, instead of a single object for the
+    whole input. Colors and textures are shared between the objects.
+    Objects are written in the order their first primitive appears.
+    Off by default.
+
+    Objects are named the way __Mesh Name__ describes. If it isn't
+    empty, every object gets that name; object names in a 3mf file
+    don't have to be unique. If the primitives also have a `mesh_name`
+    attribute, the node shows a warning that the attribute was
+    ignored. If Mesh Name is empty, each object is named by the
+    `mesh_name` attribute of its first primitive
+    ([Node:sop/hdk_read3mf] sets it).
+
+    So to keep the names of objects read with [Node:sop/hdk_read3mf],
+    clear Mesh Name. To give each object a name of your own, clear
+    Mesh Name and set `mesh_name` in a Primitive Wrangle before this
+    node, for example
+    `s@mesh_name = sprintf("fluffy_%d", i@object_id);`.
+
+    With an integer attribute, its values become the objects' ids in
+    the file — see __Object Attribute__.
+
+    If the attribute doesn't exist, the whole input is saved as one
+    object and the node shows a warning.
+
+    NOTE:
+        [Node:sop/hdk_read3mf] applies a file's build transforms when
+        it reads, so the copies of one object placed several times in
+        the file all have the same `object_id`. Splitting saves them
+        back as a single object containing all the copies.
+
+Object Attribute:
+    #id: objectAttrib
+    The primitive attribute that holds each primitive's object id. The
+    default, `object_id`, is the attribute [Node:sop/hdk_read3mf] adds,
+    so a file read with it keeps its object ids when saved back.
+
+    With an integer attribute, the values become the objects' ids in
+    the file. With __Split into Objects__ on, there is one object per
+    value. With it off, the single object takes the value on the first
+    primitive; if the primitives carry several different values, the
+    node shows a warning saying which was used. 3mf object ids must be
+    1 or greater, so a value of 0 or less stops the save with an
+    error. Connectivity classes, for example, start at 0, so add 1:
+    `i@object_id = i@class + 1;`.
+
+    A string attribute can be used to split the input into objects,
+    but strings can't be ids, so those objects are numbered
+    automatically. Without the attribute, objects are also numbered
+    automatically.
 
 File Name:
     #id: filename
@@ -123,6 +198,44 @@ Designer (optional):
     Optional designer name written into the 3mf file's metadata
     header. Overridden by the `out_designer` detail attribute if
     this is left blank — see the tip above.
+
+Allow Packed Instances:
+    #id: allowPacked
+    Write packed primitives as 3mf instances. Each distinct packed
+    geometry is written once, as an object, and each packed primitive
+    becomes a build item placing that object with the packed
+    primitive's transform. Ten tubes copied to points with Pack and
+    Instance on are written as one tube mesh and ten placements. Off
+    by default; with it off, packed primitives stop the save with an
+    error, so unpack them first.
+
+    An instanced object takes its id and name from the attributes
+    *inside* its packed geometry — __Object Attribute__ and
+    `mesh_name` on the primitives you packed or copied — following
+    the same rules as for unpacked geometry. Attributes on the packed
+    primitives themselves are not used for ids, names or colors: in a
+    3mf file, colors belong to an object's mesh, so every instance of
+    an object looks the same. If the input has a `Cd` attribute, the
+    node shows a warning saying so.
+
+    Packed primitives inside packed geometry (a packed assembly copied
+    to points, for example) are written as 3mf components: one object
+    made of parts, which other software treats as a single part.
+
+    A packed primitive with a mirroring transform (a negative scale)
+    would turn its mesh inside out, so it is written as an object of
+    its own with the mirroring applied, and the node shows a warning.
+    A mirrored packed primitive that itself contains packed primitives
+    can't be written; unpack it first.
+
+    Ids given by __Object Attribute__ must be unique across all
+    objects, packed or not; a repeated id stops the save with an
+    error.
+
+    Only packed primitives that hold geometry (Packed Geometry, and
+    Packed Disk files) can be written. Others, such as packed
+    fragments or Alembic, stop the save with an error; unpack them
+    first.
 
 Save:
     #id: saveBtn

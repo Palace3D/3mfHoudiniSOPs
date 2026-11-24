@@ -4,13 +4,13 @@ SOP nodes in C++ for importing and exporting 3mf files. These
 supersede earlier Python versions.
 
 Builds and runs on both Linux and Windows. A prebuilt package is
-available for Windows, for Houdini 20.5 and 22.0.
+available for Windows, for Houdini 20.5, 21.0 and 22.0.
 
 ## Installation
 
 There are two ways to install these SOPs:
 
-- **Prebuilt package (Windows, Houdini 20.5 and 22.0).** Download,
+- **Prebuilt package (Windows, Houdini 20.5, 21.0 and 22.0).** Download,
   unzip, restart Houdini. Nothing to build and no settings to edit.
 - **Build from source**, for Linux, other Houdini versions, or
   development. See [Building from source](#building-from-source).
@@ -29,8 +29,8 @@ with the wrong version in it is an easy mistake to make.
 ### Installing the package (Windows)
 
 1. From this repository's **Releases** page on GitHub, download
-   `palace3d_3mf-<version>-windows.zip`. The one zip works with both
-   Houdini 20.5 and 22.0.
+   `palace3d_3mf-<version>-windows.zip`. The one zip works with
+   Houdini 20.5, 21.0 and 22.0.
 2. Find your Houdini user preferences folder. It is usually
    `C:\Users\<you>\Documents\houdiniX.Y`, but if your Documents
    folder is synced by OneDrive it may be somewhere like
@@ -54,8 +54,8 @@ with the wrong version in it is an easy mistake to make.
    "3mf"), and right-click > **Help** on either node shows its help
    page.
 
-If you use both Houdini 20.5 and 22.0, unzip into each version's
-`packages` folder.
+If you use more than one of these Houdini versions, unzip into each
+version's `packages` folder.
 
 **Updating:** delete `palace3d_3mf.json` and the `palace3d_3mf`
 folder from `packages`, unzip the new version there, and restart
@@ -65,8 +65,8 @@ Houdini. **Uninstalling:** delete the same two.
 `HOUDINI_PACKAGE_VERBOSE=1` and start `hbatch.exe` from a Command
 Prompt (it's in Houdini's `bin` folder): Houdini then prints which
 package files it found and what it did with them. A package for the
-wrong Houdini version is skipped silently: it only loads in 20.5.x
-and 22.0.x.
+wrong Houdini version is skipped silently: it only loads in 20.5.x,
+21.0.x and 22.0.x.
 
 ### Switching from a source build
 
@@ -84,7 +84,7 @@ can go too, since the package has its own. You can also remove the
 The SOPs are built against your own Houdini install, using the HDK
 (Houdini Development Kit) that comes with every copy of Houdini, in
 `$HFS/toolkit/`. They have been built and tested with **Houdini
-22.0** (and, for the prebuilt package, 20.5). A plugin built for one
+22.0** (and, for the prebuilt package, 20.5 and 21.0). A plugin built for one
 Houdini version (e.g. 22.0) will not load in another (e.g. 20.5):
 you have to build it against the version you'll run it in, and older
 versions may need small code changes.
@@ -235,11 +235,12 @@ which has no console to print to) from a terminal. Then:
 package:
 
 - `palace3d_3mf.json`: the Houdini package file. It enables the
-  package only on Windows in Houdini 20.5.x and 22.0.x, and points
+  package only on Windows in Houdini 20.5.x, 21.0.x and 22.0.x, and points
   Houdini at the matching build's `dso` folder and at the shared help
   pages, using `$HOUDINI_PACKAGE_PATH` so users edit nothing.
 - `build_release.bat`: builds both SOPs in Release for each Houdini
-  version listed at its top (into `build-20.5` and `build-22.0`),
+  version listed at its top (into `build-20.5`, `build-21.0` and
+  `build-22.0`),
   stages the package in `dist\stage`, and zips it into
   `dist\palace3d_3mf-<version>-windows.zip`. Set the Houdini install
   paths, any MSVC toolset needed for 20.5, and the vcpkg folder at
@@ -289,10 +290,10 @@ did in the viewport. Texture images are not changed either way.
 
 **Exporter version.** `Save3mf` records the version of what it
 writes in each file's `Application` metadata. The current `Save3mf`
-writes `Houdini 3MF Export 3.1`. This number changes only when the
+writes `Houdini 3MF Export 3.2`. This number changes only when the
 contents of the files `Save3mf` writes change, so it is separate from
 the release number of the package: a release that only fixes other
-things still writes `Houdini 3MF Export 3.1`.
+things keeps the same exporter version.
 
 **Files from Save3mf 3.0 and earlier.** Before version 3.1,
 `Save3mf` wrote linear `Cd` values into the file without converting
@@ -372,10 +373,25 @@ other DLLs:
 - Texture `filter` settings are not currently supported. A texture
   that sets one is read with the default filter, and Read3mf puts a
   warning on the node.
-- Save3mf currently writes the whole input as a single 3mf object.
-  A part read from a file with several objects is therefore saved
-  back as one object; the `object_id` and `mesh_name` attributes
-  Read3mf adds are not used when saving.
+- By default Save3mf writes the whole input as a single 3mf object.
+  Turn on **Split into Objects** to write one object per value of a
+  primitive attribute (by default `object_id`, which Read3mf adds),
+  each named by its `mesh_name` attribute when there is one. Read3mf
+  applies the build transforms when it reads, so copies of one object
+  placed several times in the file share an `object_id` and are saved
+  back as a single object holding all the copies. Read3mf also adds
+  `build_object_id`, the object each primitive was placed as part of;
+  splitting on it instead keeps parts built from components (as in
+  Bambu Studio files) together as the parts they were.
+- Save3mf takes packed primitives only with **Allow Packed
+  Instances** on, which writes each distinct packed geometry once and
+  places it with each packed primitive's transform. Colors set on the
+  packed primitives themselves aren't written, since in 3mf every
+  instance of an object has the same colors. Only packed primitives
+  that hold geometry (Packed Geometry, Packed Disk) are supported.
+- Read3mf currently applies a file's build transforms and component
+  transforms as it reads, so instances come back as separate copies
+  of the geometry rather than as packed primitives.
 - We do not currently support the Composite Materials extension
   (`<m:compositematerials>`). A composite materials group that an
   object or triangle refers to directly is skipped, with a warning
@@ -384,12 +400,16 @@ other DLLs:
   materials group used as a layer of a multiproperties group makes
   the import fail with an error whenever that multiproperties group
   is used.
-- We currently read only the root model file in a 3mf package. Models
-  whose objects live in other `.model` files, which the Production
-  Extension allows through a `p:path` attribute on components and
-  build items, are not supported. The other files are not parsed,
-  and the import stops with an error naming the file as soon as it
-  meets a component or build item that points into one.
+- Read3mf reads models whose objects live in other `.model` files,
+  which the Production Extension allows through a `p:path` attribute
+  on components and build items (Bambu Studio writes most files this
+  way). Each model file numbers its objects separately, so an object
+  from a file other than the root model file gets a new `object_id`,
+  unique across the import; the `model_file` and `file_object_id`
+  primitive attributes record the file it came from and its id there.
+  A model file that uses a different unit from the root model file is
+  not currently supported, and the import stops with an error naming
+  the file.
 - Read3mf currently understands only the Materials and Production
   extensions. A file can list the extensions it can't be read
   correctly without (its `requiredextensions`); if that list names any
