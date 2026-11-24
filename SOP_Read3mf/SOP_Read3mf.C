@@ -718,6 +718,35 @@ partRelativePath(const std::string &part) {
 
 
 //
+// What's wrong with a part name used in a path attribute, or an empty string if nothing is. The 3mf Core
+// Specification: "Part names MUST use absolute paths, meaning all paths begin with "/". Part names MUST NOT be
+// empty or lead with a period (e.g. "/3D/.png" or "/3D/")." A ".." step is also refused, since it would lead
+// outside the package.
+//
+static std::string
+partNameProblem(const std::string &part) {
+    if (part.empty() || part[0] != '/') {
+        return "is a relative path. Paths to parts of a 3mf package must be absolute, starting with '/'";
+    }
+    if (part.back() == '/') {
+        return "names a folder, not a file";
+    }
+    const std::string fileName = part.substr(part.rfind('/') + 1);
+    if (fileName[0] == '.') {
+        return "has a file name starting with a period (not allowed in a 3mf part name)";
+    }
+    std::istringstream steps(part.substr(1));
+    std::string step;
+    while (std::getline(steps, step, '/')) {
+        if (step == "..") {
+            return "leads outside the 3mf package";
+        }
+    }
+    return "";
+}
+
+
+//
 // A part name as a lookup key. Part names are not case sensitive, so lower case, and without a leading slash.
 //
 static std::string
@@ -730,14 +759,20 @@ partKey(const std::string &part) {
 
 //
 // The model files, other than the root model file, that the root model file's components and build items refer
-// to through the Production Extension's path attribute, in the order they're first used, each listed once.
+// to through the Production Extension's path attribute, in the order they're first used, each listed once. Every
+// reference also goes into spellings, as written, since the same file can be named in more than one way.
 //
 static void
-collectReferencedParts(tinyxml2::XMLElement *root, const std::string &rootModelPart, std::vector<std::string> &parts) {
+collectReferencedParts(tinyxml2::XMLElement *root, const std::string &rootModelPart, std::vector<std::string> &parts,
+                       std::vector<std::string> &spellings) {
     std::unordered_set<std::string> seen;
     auto note = [&](const tinyxml2::XMLElement *element) {
         std::string otherFile;
-        if (refersToOtherModelFile(element, rootModelPart, otherFile) && seen.insert(partKey(otherFile)).second) {
+        if (!refersToOtherModelFile(element, rootModelPart, otherFile)) {
+            return;
+        }
+        spellings.push_back(otherFile); // every reference, as written, so each one's name can be checked
+        if (seen.insert(partKey(otherFile)).second) {
             parts.push_back(otherFile);
         }
     };
@@ -2366,7 +2401,24 @@ SOP_Read3mf::read(void *data, int index, fpreal t, const PRM_Template *tplate) {
     // overwrite a file from an earlier read. A renderer showing that earlier read may still have its textures
     // open (on Windows that blocks overwriting them), and renderers cache textures by file name, so a reused
     // name could also show a stale image. The node name keeps different Read3mf nodes apart.
-    std::string nodeFolder = me->assets + "/" + me->getName().buffer();
+    //
+    // The folder is made a full path first. Texture paths are handed to shaders as they are, and a relative one
+    // (such as "./read3mf_Assets", the default before 1.1.1) is resolved from the current folder of whatever program
+    // opens it. The renderer runs as a program of its own and can start in a different folder from Houdini, so
+    // it then can't find the textures. Files still go where they always did: a relative Asset Folder is taken
+    // from Houdini's current folder, as before.
+    std::string assetsFolder = me->assets;
+    {
+        std::error_code ec;
+        std::filesystem::path absoluteAssets = std::filesystem::absolute(std::filesystem::path(me->assets), ec);
+        if (!ec) {
+            assetsFolder = absoluteAssets.lexically_normal().generic_string();
+            while (assetsFolder.size() > 1 && assetsFolder.back() == '/') {
+                assetsFolder.pop_back();
+            }
+        }
+    }
+    std::string nodeFolder = assetsFolder + "/" + me->getName().buffer();
     long long readStamp = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::system_clock::now().time_since_epoch()).count();
     std::string readFolderName = "read-" + std::to_string(readStamp);
@@ -2553,9 +2605,20 @@ SOP_Read3mf::ErrorCode
 SOP_Read3mf::processReferencedModels(tinyxml2::XMLElement *root,
                                      const std::function<ErrorCode(tinyxml2::XMLElement *)> &handleModel) {
     std::vector<std::string> parts;
-    collectReferencedParts(root, this->rootModelPart, parts);
+    std::vector<std::string> spellings;
+    collectReferencedParts(root, this->rootModelPart, parts, spellings);
     if (parts.empty()) {
         return ErrorCode::SUCCESS;
+    }
+
+    // Every path must be a valid part name, before anything is loaded
+    for (const std::string &spelling : spellings) {
+        std::string problem = partNameProblem(spelling);
+        if (!problem.empty()) {
+            this->readError("This file refers to the model file '" + spelling + "', which " + problem
+                + ", so the file is invalid.");
+            return ErrorCode::BAD_3MF;
+        }
     }
 
     const char *rootUnitC = root->Attribute("unit");
@@ -2567,15 +2630,7 @@ SOP_Read3mf::processReferencedModels(tinyxml2::XMLElement *root,
     for (const std::string &part : parts) {
         LOG_DEBUG(this->debug, "Reading the referenced model file " << part);
         const std::string relative = partRelativePath(part);
-
-        // A part name must stay inside the package
         std::filesystem::path relativePath(relative);
-        for (const auto &piece : relativePath) {
-            if (piece == "..") {
-                this->readError("This file refers to the model file '" + part + "', which is outside the 3mf package.");
-                return ErrorCode::BAD_3MF;
-            }
-        }
         const std::string diskPath = (std::filesystem::path(this->extractFolder) / relativePath).string();
 
         auto doc = std::make_unique<tinyxml2::XMLDocument>();

@@ -289,7 +289,8 @@ namespace HDK_Sample {
         static constexpr PixelColor             WHITE = { UT_Vector3(1.0, 1.0, 1.0), 1.0f };
         static constexpr PixelColor             DEFAULT_COLOR = WHITE;
         static constexpr int                DEFAULT_GROUP = -1;
-        static constexpr std::string_view   EXTRACTFOLDER_DEFAULT = "./read3mf_Assets";
+        // Default Asset Folder: next to the .hip file. ($HIP is expanded when the parameter is evaluated.)
+        static constexpr std::string_view   EXTRACTFOLDER_DEFAULT = "$HIP/read3mf_Assets";
 
     protected:
         /// Method to cook geometry for the SOP

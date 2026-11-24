@@ -244,7 +244,9 @@ File Name:
 Asset Folder:
     #id: assets
     Folder into which the 3mf archive is unpacked (textures and
-    other referenced files land here during the read). Each Read
+    other referenced files land here during the read). The default,
+    `$HIP/read3mf_Assets`, is a folder next to your .hip file. A
+    relative path is taken from Houdini's current folder. Each Read
     unpacks into a new subfolder, `<node name>/read-<number>`, so it
     never overwrites files from an earlier read that a render view
     may still have open. Older read folders for the node are deleted
