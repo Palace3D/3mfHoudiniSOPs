@@ -32,10 +32,10 @@ TIP:
     from upstream data instead of typing them in by hand. Add a
     Detail Wrangle before this node and set the string detail
     attributes `out_filename`, `out_title`, `out_description`, and
-    `out_designer` to whatever your setup computes. This lets you compute the strings directly in
-    VEX from the geometry's own attributes and content, rather than
-    having to reference that data back through a parameter
-    expression.
+    `out_designer` to whatever your setup computes. This lets you
+    compute the strings directly in VEX from the geometry's own
+    attributes and content, rather than having to reference that data
+    back through a parameter expression.
 
     If you leave the corresponding parameter blank, the detail
     attribute is used. If you type a value directly into the
@@ -57,6 +57,28 @@ TIP:
     read and save unchanged once Mesh Name is cleared. (Save3mf 3.1
     and earlier read an `out_mesh` detail attribute instead; it is no
     longer used. Set `s@mesh_name` in a Primitive Wrangle instead.)
+
+== Limitations ==
+
+Each item below says what happens when the input is affected.
+
+- Triangles only. The input must be triangles, including inside
+  packed primitives, since a 3mf mesh can only hold triangles (3mf
+  Core Specification). Save3mf doesn't change the geometry, so other
+  polygons stop the save with an error. Triangulate first, for example
+  with a Divide SOP (Convex Polygons on, Maximum Edges 3).
+
+- Packed primitive types. Only packed primitives that hold geometry
+  (Packed Geometry, and Packed Disk files) can be written. Others,
+  such as packed fragments or Alembic, stop the save with an error.
+
+- Per-copy colors on packed primitives. A color set on a packed
+  primitive itself isn't written, since in 3mf every placement of an
+  object has the same colors. The node shows a warning.
+
+- Mirrored packed assemblies. A packed primitive with a mirroring
+  transform that itself contains packed primitives can't be written;
+  the save stops with an error. Unpack it first.
 
 @parameters
 
@@ -154,6 +176,11 @@ Split into Objects:
         the file all have the same `object_id`. Splitting saves them
         back as a single object containing all the copies.
 
+        [Node:sop/hdk_read3mf] also adds `build_object_id`, the object
+        each primitive was placed as part of. Set __Object Attribute__
+        to `build_object_id` to keep parts built from components (as in
+        files from Bambu Studio) together as the parts they were.
+
 Object Attribute:
     #id: objectAttrib
     The primitive attribute that holds each primitive's object id. The
@@ -215,8 +242,11 @@ Allow Packed Instances:
     the same rules as for unpacked geometry. Attributes on the packed
     primitives themselves are not used for ids, names or colors: in a
     3mf file, colors belong to an object's mesh, so every instance of
-    an object looks the same. If the input has a `Cd` attribute, the
-    node shows a warning saying so.
+    an object looks the same. If the packed primitives have a `Cd`
+    attribute (a per-copy color from Copy to Points, for example), the
+    node shows a warning saying so. Colors inside the packed geometry
+    are written as usual. To keep per-copy colors, unpack before
+    saving.
 
     Packed primitives inside packed geometry (a packed assembly copied
     to points, for example) are written as 3mf components: one object

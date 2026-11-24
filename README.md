@@ -355,64 +355,86 @@ other DLLs:
 - `minizip`
 - `zlib`
 
-## Status and Limitations
+## Objects, Components and Instances
 
-- Multiproperties are supported, with colorgroup, texture, and base
-  material layers and their alphas, except for the `multiply` blend
-  method. If a multiproperties group's `blendmethods` asks for
-  `multiply`, the import currently stops with an error naming the
-  group; turn on Only Geometry to import the shape without colors.
+**Reading.** A 3mf file can build an object from other objects (its
+components), and its `<build>` section places objects with
+transforms. `Read3mf` applies all of these as it reads (with **Apply
+Build Instructions** off, it places each top-level object once, at
+its own coordinates), and tags every primitive with where it came
+from:
+
+- `object_id`: the object whose mesh the primitive came from.
+- `build_object_id`: the object it was placed as part of. In a Bambu
+  Studio file, for instance, each part is a wrapper object around a
+  mesh object, so `object_id` gives the mesh object and
+  `build_object_id` the part.
+- `mesh_name`: the object's name, if it has one.
+- `model_file` and `file_object_id`: the model file inside the 3mf
+  package the object came from, and its id there. A model can be
+  split across several model files (the Production Extension's
+  `p:path`, which Bambu Studio uses for most files). Each file numbers
+  its objects separately, so an object from a file other than the
+  root model file gets a new `object_id`, unique across the import.
+
+**Writing.** By default `Save3mf` writes the whole input as a single
+3mf object. Turn on **Split into Objects** to write one object per
+value of a primitive attribute (by default `object_id`), each named by
+its `mesh_name` attribute when there is one. Copies of one object
+placed several times in a file share an `object_id`, so they're saved
+back as a single object holding all the copies; split on
+`build_object_id` instead to keep parts built from components
+together as the parts they were.
+
+With **Allow Packed Instances** on, `Save3mf` writes each distinct
+packed geometry once and places it with each packed primitive's
+transform. A mirrored copy (negative scale) is written as an object
+of its own with the mirroring applied, since a mirrored instance would
+turn its mesh inside out, and the node shows a warning saying so.
+
+## Limitations
+
+**Read3mf:**
+- The multiproperties `multiply` blend method is not currently
+  supported. The import stops with an error naming the group; turn on
+  Only Geometry to import the shape without colors.
 - When a multiproperties group's first layer is a base material, the
   3mf spec recommends blending the layers above it on their own and
   then laying the result over the material. Read3mf currently blends
-  all the layers in order instead. That gives the same colors wherever
-  the second layer is fully opaque, but can differ where it is partly
-  transparent. Read3mf checks the second layer's alphas and puts a
-  warning on the node, naming the group, only when that layer can be
-  partly transparent.
-- Texture `filter` settings are not currently supported. A texture
-  that sets one is read with the default filter, and Read3mf puts a
-  warning on the node.
-- By default Save3mf writes the whole input as a single 3mf object.
-  Turn on **Split into Objects** to write one object per value of a
-  primitive attribute (by default `object_id`, which Read3mf adds),
-  each named by its `mesh_name` attribute when there is one. Read3mf
-  applies the build transforms when it reads, so copies of one object
-  placed several times in the file share an `object_id` and are saved
-  back as a single object holding all the copies. Read3mf also adds
-  `build_object_id`, the object each primitive was placed as part of;
-  splitting on it instead keeps parts built from components (as in
-  Bambu Studio files) together as the parts they were.
-- Save3mf takes packed primitives only with **Allow Packed
-  Instances** on, which writes each distinct packed geometry once and
-  places it with each packed primitive's transform. Colors set on the
-  packed primitives themselves aren't written, since in 3mf every
-  instance of an object has the same colors. Only packed primitives
-  that hold geometry (Packed Geometry, Packed Disk) are supported.
-- Read3mf currently applies a file's build transforms and component
-  transforms as it reads, so instances come back as separate copies
-  of the geometry rather than as packed primitives.
-- We do not currently support the Composite Materials extension
-  (`<m:compositematerials>`). A composite materials group that an
-  object or triangle refers to directly is skipped, with a warning
-  in the console, and whatever refers to it gets the object's
-  default color (white if the object has none). A composite
-  materials group used as a layer of a multiproperties group makes
-  the import fail with an error whenever that multiproperties group
-  is used.
-- Read3mf reads models whose objects live in other `.model` files,
-  which the Production Extension allows through a `p:path` attribute
-  on components and build items (Bambu Studio writes most files this
-  way). Each model file numbers its objects separately, so an object
-  from a file other than the root model file gets a new `object_id`,
-  unique across the import; the `model_file` and `file_object_id`
-  primitive attributes record the file it came from and its id there.
-  A model file that uses a different unit from the root model file is
-  not currently supported, and the import stops with an error naming
-  the file.
-- Read3mf currently understands only the Materials and Production
-  extensions. A file can list the extensions it can't be read
-  correctly without (its `requiredextensions`); if that list names any
-  others, such as Slice or Beam Lattice, Read3mf still reads the file
-  but puts a warning on the node naming them, since whatever depends on
-  them is ignored.
+  all the layers in order. That gives the same colors wherever the
+  second layer is fully opaque, but can differ where it is partly
+  transparent; Read3mf warns, naming the group, only when that layer
+  can be partly transparent.
+- The Composite Materials extension (`<m:compositematerials>`) is not
+  currently supported. A group that an object or triangle refers to
+  directly is skipped (with a warning in the console only), and
+  whatever refers to it gets the object's default color (white if it
+  has none). A group used as a multiproperties layer stops the import
+  with an error naming the group.
+- Texture `filter` settings are not currently supported; such a
+  texture is read with the default filter, with a warning on the node.
+- A model file that uses a different unit from the root model file is
+  not currently supported; the import stops with an error naming the
+  file.
+- Only the Materials and Production extensions are currently
+  understood. If a file's `requiredextensions` names any others (such
+  as Slice or Beam Lattice), the file is still read, with a warning
+  on the node naming them, but whatever depends on them is ignored.
+- Slicer-specific data, such as colors painted in Bambu Studio, is not
+  currently read.
+- Instances come back as separate copies of the geometry, not as
+  packed primitives.
+
+**Save3mf:**
+- The input must be triangles, including inside packed primitives;
+  other polygons stop the save with an error.
+- Only packed primitives that hold geometry (Packed Geometry, Packed
+  Disk) are currently supported. Others, such as packed fragments or
+  Alembic, stop the save with an error; unpack them first.
+- A color set on a packed primitive itself (for example, a per-copy
+  `Cd` from Copy to Points) isn't written, since in 3mf every placement
+  of an object has the same colors; the node shows a warning. Colors
+  inside the packed geometry are written as usual. To keep per-copy
+  colors, unpack before saving.
+- A mirrored packed primitive that itself contains packed primitives
+  can't be written; the save stops with an error. Unpack it first.

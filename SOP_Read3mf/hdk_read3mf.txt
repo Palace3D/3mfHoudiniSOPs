@@ -111,9 +111,10 @@ NOTE:
 
 == Limitations ==
 
-Read3mf supports the 3mf Core Specification and most of the
-Materials Specification. In each case below, Read3mf puts an error
-or warning on the node when a file is affected.
+Read3mf supports the 3mf Core Specification, most of the Materials
+Specification, and models split across several model files (the
+Production Extension). Each item below says what happens when a file
+is affected.
 
 - Multiproperties: the `multiply` blend method. Multiproperties
   (a triangle combining several properties at once) are supported,
@@ -141,12 +142,10 @@ or warning on the node when a file is affected.
   as a layer of a multiproperties group makes the import stop with an
   error naming the group whenever that multiproperties group is used.
 
-- Models in several files. Read3mf reads models whose objects live
-  in other model files (the Production Extension's `p:path` attribute
-  on components and build items), as Bambu Studio writes them. A model
-  file that uses a different unit from the root model file is not
-  currently supported, and the import stops with an error naming the
-  file.
+- Model files with different units. A model split across several
+  model files is read, but a model file that uses a different unit
+  from the root model file is not currently supported. The import
+  stops with an error naming the file.
 
 - Other extensions. Read3mf currently understands only the
   Materials and Production extensions. If a file says it requires any
@@ -158,6 +157,15 @@ or warning on the node when a file is affected.
 - Texture filters. A texture's `filter` setting is not currently
   supported. Such a texture is read with the default filter, and
   Read3mf puts a warning on the node.
+
+- Slicer-specific data. Data a slicer stores in its own format, such
+  as colors painted in Bambu Studio, is not currently read. There's
+  no message; the geometry comes in without it.
+
+- Instances. A file's build and component transforms are applied as
+  it's read, so an object placed several times comes back as separate
+  copies of its geometry, not as packed primitives. There's no
+  message.
 
 @parameters
 
