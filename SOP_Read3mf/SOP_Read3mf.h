@@ -208,6 +208,17 @@ namespace HDK_Sample {
         PixelColor defaultColor;
         int defaultColorGroup = -1;
         GU_DetailHandle objGdpHandle;
+        // Where the object came from, for tagging packed primitives (see Read Instances as Packed Primitives)
+        std::string name;               // the object's name attribute, or empty
+        std::string modelFile;          // model file inside the package, e.g. "/3D/3dmodel.model"
+        int fileObjectId = -1;          // the object's id in that file
+        // Read Instances as Packed Primitives: the object's components (object id and transform), in the order they appear,
+        // instead of their geometry being merged into objGdpHandle.
+        std::vector<std::pair<int, UT_Matrix4>> components;
+        // Read Instances as Packed Primitives: what a packed primitive placing this object holds (its mesh, or one packed
+        // primitive per component), made the first time it's needed and then shared by every placement.
+        GU_ConstDetailHandle packedContents;
+        bool packedContentsMade = false;
     };
 
     // Overload of operator << so I can print maps with ObjectData in them
@@ -410,6 +421,7 @@ namespace HDK_Sample {
         void                FILENAME(std::string& my_file, fpreal t)    { UT_StringHolder result; evalString(result, "filename", 0, t); my_file = result.toStdString(); return;}
         void                ASSETS(std::string& my_assets, fpreal t)   { UT_StringHolder result; evalString(result, "assets", 0, t); my_assets = result.toStdString(); return;}
         bool                DEBUG(fpreal t) { return evalInt("debug", 0, t); }
+        bool                PACKINSTANCES(fpreal t) { return evalInt("packInstances", 0, t); }
         std::string         filename;
         bool                flip = true;
         bool                overrideShader = false;
@@ -418,6 +430,7 @@ namespace HDK_Sample {
         bool                build = true;
         bool                geoOnly = false;
         bool                debug = false;
+        bool                packInstances = false;
         std::string         assets;
 
         // Set true in read so when cookMySop is forced to run it knows it needs to read in the 3mf file
@@ -534,8 +547,8 @@ namespace HDK_Sample {
         // key: texid of texture, value: the file path to the original texture on disk
         std::unordered_map<int, std::string>                textureFilesDict;
 
-        // key: object id if it's listed in the build feature, value: a list of transforms for the object
-        UT_Map<int, std::vector<UT_Matrix4>>     buildDict;
+        // The build items in the order the file lists them: the object each places, and its transform
+        std::vector<std::pair<int, UT_Matrix4>>  buildItems;
 
         // Ids of the objects used as a component of another object. Without build instructions, only objects not
         // in here are placed, so a component's geometry isn't placed both on its own and inside what uses it.
@@ -546,6 +559,7 @@ namespace HDK_Sample {
         void                        ensureMaterialNetwork();
         void                        noteDecorFeatures(tinyxml2::XMLDocument *doc);
         void                        readError(const std::string &message);
+        GU_ConstDetailHandle        packedContentsFor(int objectID, int depth, std::string &error);
         SOP_Read3mf::ErrorCode      processReferencedModels(tinyxml2::XMLElement *root,
             const std::function<SOP_Read3mf::ErrorCode(tinyxml2::XMLElement *)> &handleModel);
         static int                  read(void *data, int index, fpreal t, const PRM_Template *tplate);

@@ -127,7 +127,7 @@ private:
     // 3.1: colors are written as sRGB if the "Convert sRGB" toggle is on (and it is by default)
     // 3.2: optionally several objects, split by a primitive attribute ("Split into Objects"); object ids come
     //      from that attribute; mesh names come from the mesh_name primitive attribute instead of the out_mesh
-    //      detail attribute; optionally packed primitives as instances ("Allow Packed Instances")
+    //      detail attribute; optionally packed primitives as instances ("Write Packed Primitives as Instances")
     static constexpr const char*    EXPORTER_VERSION = "3.2";
     // Color for default object-level property, unless discovered otherwise
     static constexpr std::array<int, 3>    DEFAULT_COLOR = {0xff, 0xff, 0xff};
@@ -186,7 +186,7 @@ private:
         int                     fileId = 0;
     };
 
-    // Allow Packed Instances: a packed primitive placing a packed geometry (index into the list of distinct
+    // Write Packed Primitives as Instances: a packed primitive placing a packed geometry (index into the list of distinct
     // geometries) with its full transform
     struct PackedPlacement {
         size_t                  geo = 0;

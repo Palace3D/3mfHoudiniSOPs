@@ -66,12 +66,28 @@ Primitive attributes, tagging every primitive with which 3mf
   to. In a file from Bambu Studio, for instance, each part is a
   wrapper object around a mesh object in another model file:
   `object_id` gives the mesh object, and `build_object_id` the part.
+- `build_item` (integer) — which placement the primitive belongs to,
+  numbered from 0 in the order the file's `<build>` section lists its
+  items (or, with Apply Build Instructions off, in order of object id).
+  An object placed several times has the same `build_object_id` in
+  every copy, so this is what tells the copies apart.
 
 NOTE:
     These survive merging multiple objects into one piece of
     geometry (via `<build>` instructions or components), so a file
     with several named objects still lets you tell, per primitive,
     which original object it belongs to.
+
+With __Read Instances as Packed Primitives__ on, the top-level packed
+primitives carry `build_object_id` and `build_item`, and every packed
+primitive (including those inside assemblies) carries:
+- `packed_object_id` (integer) — the id of the object it places.
+- `packed_mesh_name` (string) — that object's name, if it had one.
+
+The triangles inside keep `object_id`, `mesh_name`, `model_file` and
+`file_object_id`. The packed primitives' own attributes have
+different names so that an Unpack SOP copying attributes down onto
+the triangles doesn't overwrite them.
 
 == Materials and Shaders ==
 
@@ -162,11 +178,6 @@ is affected.
   as colors painted in Bambu Studio, is not currently read. There's
   no message; the geometry comes in without it.
 
-- Instances. A file's build and component transforms are applied as
-  it's read, so an object placed several times comes back as separate
-  copies of its geometry, not as packed primitives. There's no
-  message.
-
 @parameters
 
 Flip Normals:
@@ -190,6 +201,40 @@ Apply Build Instructions:
     slicer's placement of a part on its build plate (files from
     slicers such as Bambu Studio put the part where it sits on the
     plate, often far from the origin).
+
+Read Instances as Packed Primitives:
+    #id: packInstances
+    Bring the file's instances in as packed primitives instead of
+    separate copies. Each object's mesh is stored once, and each build
+    item becomes a packed primitive placing it with the item's
+    transform. An object made of components (an assembly, or one of
+    Bambu Studio's wrapper objects) becomes a packed primitive that
+    holds one packed primitive per component, nested as deep as the
+    file nests them. Each object's contents are shared by all of its
+    placements, so a file with many copies of a large mesh takes
+    little memory.
+
+    This mirrors how [Node:sop/hdk_save3mf] writes packed primitives
+    with its __Write Packed Primitives as Instances__ option on, so
+    reading a file this way and saving it back keeps its instances and
+    assemblies. Assembly objects that have no mesh of their own get new
+    ids when saved, though.
+
+    Off by default: the file's transforms are then applied as it's
+    read, and every placement comes in as its own copy of the
+    geometry, as in earlier versions. An Unpack SOP turns packed
+    primitives back into geometry; a nested assembly needs one Unpack
+    per level of nesting. Takes effect the next time Read is pressed.
+
+    NOTE:
+        Colors, UVs and material assignments stay on the triangles
+        inside the packed primitives. The viewport shows them as
+        usual, but by default a Mantra render node passes on only the
+        materials referenced at the top level of the geometry, so
+        textures are missing from the render. On the Mantra node the
+        Render View uses (usually `/out/mantra_ipr`), set Declare
+        Materials on the Rendering tab to save all materials and
+        re-render.
 
 Only Geometry:
     #id: geo

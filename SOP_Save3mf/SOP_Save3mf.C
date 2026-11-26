@@ -122,7 +122,7 @@ static PRM_Name names[] = {
     PRM_Name("convertSRGB", "Convert sRGB"), // Houdini's Cd is linear, 3mf colors are sRGB
     PRM_Name("splitObjects", "Split into Objects"), // One 3mf object per value of a primitive attribute
     PRM_Name("objectAttrib", "Object Attribute"),   // The primitive attribute to split by
-    PRM_Name("allowPacked", "Allow Packed Instances"), // Write packed primitives as 3mf instances
+    PRM_Name("allowPacked", "Write Packed Primitives as Instances"), // Write packed primitives as 3mf instances
 };
 
 // SOP parameter defaults
@@ -725,7 +725,7 @@ SOP_Save3mf::save(void *data, int index, fpreal t, const PRM_Template *tplate)
 // file.
 // With Split into Objects off, the input's primitives are a single 3mf object, as in earlier versions. With it
 // on, they are divided into objects by the value of the Object Attribute, and each object gets its own build
-// item. With Allow Packed Instances on, each distinct packed geometry is written once, as an object, and each
+// item. With Write Packed Primitives as Instances on, each distinct packed geometry is written once, as an object, and each
 // packed primitive becomes a build item placing it. The colors and textures are written once, as resources all
 // the objects share.
 //
@@ -761,7 +761,7 @@ SOP_Save3mf::buildModel(const GU_Detail* gdp) {
         geo = &work;
     } else {
         // Check the primitives before writing anything, so a problem gets a clear error on the node.
-        // (This is also where packed input without Allow Packed Instances stops.)
+        // (This is also where packed input without Write Packed Primitives as Instances stops.)
         if ((myError = this->checkPrimitives(gdp, "")) != SOP_Save3mf::ErrorCode::SUCCESS) {
             return myError;
         }
@@ -1273,7 +1273,7 @@ SOP_Save3mf::checkPrimitives(const GU_Detail* gdp, const std::string& where) {
     }
     if (numPacked > 0) {
         std::string message = "The input contains " + std::to_string(numPacked)
-            + " packed primitive(s). Unpack them first, or turn on Allow Packed Instances.";
+            + " packed primitive(s). Unpack them first, or turn on Write Packed Primitives as Instances.";
         std::cerr << "Error: " << message << std::endl;
         this->saveError(message);
         return ErrorCode::BAD_GEO;
@@ -1521,7 +1521,7 @@ SOP_Save3mf::writeItem(int objId, const std::string& xform) {
 
 
 //
-// Allow Packed Instances: take the input apart into
+// Write Packed Primitives as Instances: take the input apart into
 //  - work: one detail holding the input's own (unpacked) primitives first, then the primitives of each distinct
 //    packed geometry, so the existing color, texture and mesh code can run over all of them at once;
 //  - topPrims: the input's own primitives, as offsets in work, split into topParts if Split into Objects is on;

@@ -18,7 +18,7 @@ Turn on __Split into Objects__ to write one object per value of a
 primitive attribute instead, for example to save back the separate
 objects of a file read with [Node:sop/hdk_read3mf].
 
-Turn on __Allow Packed Instances__ to write packed primitives (for
+Turn on __Write Packed Primitives as Instances__ to write packed primitives (for
 example from a Copy to Points with Pack and Instance on) as 3mf
 instances: each distinct packed geometry is written once, and each
 packed primitive places it with its own transform.
@@ -171,10 +171,11 @@ Split into Objects:
     object and the node shows a warning.
 
     NOTE:
-        [Node:sop/hdk_read3mf] applies a file's build transforms when
-        it reads, so the copies of one object placed several times in
-        the file all have the same `object_id`. Splitting saves them
-        back as a single object containing all the copies.
+        By default, [Node:sop/hdk_read3mf] applies a file's build
+        transforms when it reads, so the copies of one object placed
+        several times in the file all have the same `object_id`.
+        Splitting saves them back as a single object containing all
+        the copies.
 
         [Node:sop/hdk_read3mf] also adds `build_object_id`, the object
         each primitive was placed as part of. Set __Object Attribute__
@@ -226,7 +227,7 @@ Designer (optional):
     header. Overridden by the `out_designer` detail attribute if
     this is left blank — see the tip above.
 
-Allow Packed Instances:
+Write Packed Primitives as Instances:
     #id: allowPacked
     Write packed primitives as 3mf instances. Each distinct packed
     geometry is written once, as an object, and each packed primitive
@@ -234,7 +235,12 @@ Allow Packed Instances:
     primitive's transform. Ten tubes copied to points with Pack and
     Instance on are written as one tube mesh and ten placements. Off
     by default; with it off, packed primitives stop the save with an
-    error, so unpack them first.
+    error, so unpack them first. Geometry that isn't packed is written
+    the same way whether this is on or off.
+
+    To read such a file back with its instances still shared, turn on
+    __Read Instances as Packed Primitives__ in
+    [Node:sop/hdk_read3mf].
 
     An instanced object takes its id and name from the attributes
     *inside* its packed geometry — __Object Attribute__ and

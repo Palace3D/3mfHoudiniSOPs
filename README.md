@@ -376,6 +376,17 @@ from:
   `p:path`, which Bambu Studio uses for most files). Each file numbers
   its objects separately, so an object from a file other than the
   root model file gets a new `object_id`, unique across the import.
+- `build_item`: which placement the primitive belongs to, numbered
+  from 0 in the order of the file's build items, so copies of one
+  object can be told apart.
+
+Turn on **Read Instances as Packed Primitives** to bring instances in
+as packed primitives instead of copies: each object's mesh is stored
+once, each build item becomes a packed primitive, and an object made
+of components becomes a packed primitive holding packed primitives,
+nested as the file nests them. This mirrors what `Save3mf` writes
+with **Write Packed Primitives as Instances** on, so a file read this
+way and saved back keeps its instances and assemblies.
 
 **Writing.** By default `Save3mf` writes the whole input as a single
 3mf object. Turn on **Split into Objects** to write one object per
@@ -386,7 +397,7 @@ back as a single object holding all the copies; split on
 `build_object_id` instead to keep parts built from components
 together as the parts they were.
 
-With **Allow Packed Instances** on, `Save3mf` writes each distinct
+With **Write Packed Primitives as Instances** on, `Save3mf` writes each distinct
 packed geometry once and places it with each packed primitive's
 transform. A mirrored copy (negative scale) is written as an object
 of its own with the mirroring applied, since a mirrored instance would
@@ -422,12 +433,13 @@ turn its mesh inside out, and the node shows a warning saying so.
   on the node naming them, but whatever depends on them is ignored.
 - Slicer-specific data, such as colors painted in Bambu Studio, is not
   currently read.
-- Instances come back as separate copies of the geometry, not as
-  packed primitives.
 
 **Save3mf:**
-- The input must be triangles, including inside packed primitives;
-  other polygons stop the save with an error.
+- The input must be triangles, including inside packed primitives,
+  since a 3mf mesh can only hold triangles (3mf Core Specification).
+  Save3mf doesn't change the geometry, so other polygons stop the save
+  with an error; triangulate first (for example, a Divide SOP with
+  Convex Polygons on and Maximum Edges 3).
 - Only packed primitives that hold geometry (Packed Geometry, Packed
   Disk) are currently supported. Others, such as packed fragments or
   Alembic, stop the save with an error; unpack them first.

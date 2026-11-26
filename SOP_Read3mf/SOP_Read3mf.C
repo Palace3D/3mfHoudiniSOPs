@@ -66,6 +66,8 @@
 #include <UT/UT_String.h>
 #include <UT/UT_PtrArray.h>
 #include <GU/GU_PrimPoly.h>
+#include <GU/GU_PrimPacked.h>
+#include <GU/GU_PackedGeometry.h>
 #include <GEO/GEO_Primitive.h>
 #include <GEO/GEO_PrimPoly.h> // Do I need this if I'm not just doing my simple test?
 #include <GA/GA_Types.h>
@@ -184,6 +186,7 @@ static PRM_Name names[] = {
     PRM_Name("readBtn", "Read"),        // Read it
     // Listed last so the indices above don't shift. The order in the parameter pane is set by myTemplateList.
     PRM_Name("convertSRGB", "Convert sRGB"), // 3mf colors are sRGB, Houdini's Cd is linear
+    PRM_Name("packInstances", "Read Instances as Packed Primitives"), // Build items and components as packed primitives
 };
 
 // SOP parameter defaults
@@ -194,6 +197,7 @@ static PRM_Default  overrideIt(0); // Use a single shader for many textures
 static PRM_Default  convertit(1); // 3mf colors are sRGB and Houdini's Cd is linear, so convert by default
 static PRM_Default  debugit(0); // Turn on during development or major debugging
 static PRM_Default  timeit(0);  // Record how long it takes to read in the model
+static PRM_Default  packit(0);  // By default, unpack instances into full copies, as earlier versions did
 static PRM_Default  filen(0, "my-model.3mf");
 static PRM_Default  assetsn(0, SOP_Read3mf::EXTRACTFOLDER_DEFAULT.data());
 
@@ -205,6 +209,7 @@ PRM_Template
 SOP_Read3mf::myTemplateList[] = {
     PRM_Template(PRM_TOGGLE,	1, &names[0], &flipit, 0, 0, 0, 0, 1, "Flip Houdini normals to match 3mf normals."),
     PRM_Template(PRM_TOGGLE,    1, &names[1], &buildit, 0, 0, 0, 0, 1, "Apply 3mf build instructions and render only what is listed in them."),
+    PRM_Template(PRM_TOGGLE,    1, &names[10], &packit, 0, 0, 0, 0, 1, "Bring in each placed object as a packed primitive, and objects made of components as packed primitives holding packed primitives, so each mesh is stored once. Takes effect the next time Read is pressed."),
     PRM_Template(PRM_TOGGLE,    1, &names[2], &geo, 0, 0, 0, 0, 1, "Only read in geometry -- no color or texture."),
     PRM_Template(PRM_TOGGLE,    1, &names[3], &overrideIt, 0, 0, 0, 0, 1, "Use one shader for many textures."),
     PRM_Template(PRM_TOGGLE,    1, &names[9], &convertit, 0, 0, 0, 0, 1, "Convert the sRGB colors in the 3mf file to Houdini's linear Cd. Takes effect the next time Read is pressed."),
@@ -1253,7 +1258,7 @@ SOP_Read3mf::clearData() {
     //this->texturePid2IdDict.clear();
     this->shaderDict.clear();
     this->opaqueShaderDict.clear();
-    this->buildDict.clear();
+    this->buildItems.clear();
 
     this->scale_factor = 1.0f; // Read from 3mf file, so needs to be reset
     this->hasColor = false;
@@ -2214,6 +2219,7 @@ SOP_Read3mf::cookMySop(OP_Context &context) {
     this->overrideShader = this->OVERRIDE(t);
     this->convertSRGB = this->CONVERTSRGB(t);
     this->build = this->BUILD(t);
+    this->packInstances = this->PACKINSTANCES(t);
     this->geoOnly = this->GEO(t);
     this->timer = this->TIMER(t);
     this->FILENAME(this->filename, t);
@@ -2333,6 +2339,7 @@ SOP_Read3mf::read(void *data, int index, fpreal t, const PRM_Template *tplate) {
     me->flip = me->FLIP(t);
     me->overrideShader = me->OVERRIDE(t);
     me->build = me->BUILD(t);
+    me->packInstances = me->PACKINSTANCES(t);
     me->geoOnly = me->GEO(t);
     me->timer = me->TIMER(t);
     me->FILENAME(me->filename, t);
@@ -2840,6 +2847,95 @@ SOP_Read3mf::parseModelForSubnet(std::string the_model) {
 //
 // Parse the 3mf model to build the Houdini geometry.
 //
+//
+// Read Instances as Packed Primitives: give a packed primitive a 3mf transform (row vectors, translation in the last row, as
+// parseTransformString() makes it). The packed primitive's point holds the translation.
+//
+static void
+setPackedTransform(GU_Detail *gdp, GU_PrimPacked *packed, const UT_Matrix4 &m) {
+    UT_Matrix3D local;
+    for (int row = 0; row < 3; ++row) {
+        for (int col = 0; col < 3; ++col) {
+            local(row, col) = m(row, col);
+        }
+    }
+    packed->setLocalTransform(local);
+    gdp->setPos3(packed->getPointOffset(0), UT_Vector3(m(3, 0), m(3, 1), m(3, 2)));
+}
+
+
+//
+// Read Instances as Packed Primitives: tag a packed primitive with the object it places. These are named packed_* so they
+// don't collide with the object_id etc. of the primitives inside, if an Unpack SOP copies attributes down.
+//
+static void
+tagPackedPrimitive(GU_Detail *gdp, GA_Offset prim, const ObjectData &object) {
+    GA_RWHandleI(gdp->addIntTuple(GA_ATTRIB_PRIMITIVE, "packed_object_id", 1)).set(prim, object.id);
+    GA_RWHandleS(gdp->addStringTuple(GA_ATTRIB_PRIMITIVE, "packed_mesh_name", 1)).set(prim, object.name);
+}
+
+
+//
+// Read Instances as Packed Primitives: what a packed primitive placing an object holds. For an object with a mesh, the
+// mesh itself; for an object made of components, a detail with one packed primitive per component, each
+// holding that component's own contents and placed by the component's transform. Made once per object and
+// shared by every packed primitive that places it. Returns an invalid handle for an object with nothing in it,
+// and sets error (and returns an invalid handle) for a problem such as components that refer back to
+// themselves.
+//
+GU_ConstDetailHandle
+SOP_Read3mf::packedContentsFor(int objectID, int depth, std::string &error) {
+    auto it = this->objectDict.find(objectID);
+    if (it == this->objectDict.end()) {
+        error = "Object " + std::to_string(objectID) + " is used but was never defined.";
+        return GU_ConstDetailHandle();
+    }
+    ObjectData &object = *it->second;
+    if (object.packedContentsMade) {
+        return object.packedContents;
+    }
+    if (depth > 64) {
+        error = "Object " + std::to_string(objectID) + " is built from components nested more than 64 levels "
+            "deep, or from components that refer back to it.";
+        return GU_ConstDetailHandle();
+    }
+
+    if (object.components.empty()) {
+        // A mesh object. (An object holds either a mesh or components, never both.)
+        const GU_Detail *mesh = object.objGdpHandle.gdp();
+        if (mesh && mesh->getNumPrimitives() > 0) {
+            object.packedContents = GU_ConstDetailHandle(object.objGdpHandle);
+        }
+    } else {
+        GU_Detail *assembly = new GU_Detail();
+        GU_DetailHandle assemblyHandle;
+        assemblyHandle.allocateAndSet(assembly, true);
+        for (const auto &[componentID, transform] : object.components) {
+            GU_ConstDetailHandle child = this->packedContentsFor(componentID, depth + 1, error);
+            if (!error.empty()) {
+                return GU_ConstDetailHandle();
+            }
+            if (!child.isValid()) {
+                continue;
+            }
+            GU_PrimPacked *packed = GU_PackedGeometry::packGeometry(*assembly, child);
+            if (!packed) {
+                error = "Couldn't make a packed primitive for component " + std::to_string(componentID)
+                    + " of object " + std::to_string(objectID) + ".";
+                return GU_ConstDetailHandle();
+            }
+            setPackedTransform(assembly, packed, transform);
+            tagPackedPrimitive(assembly, packed->getMapOffset(), *this->objectDict[componentID]);
+        }
+        if (assembly->getNumPrimitives() > 0) {
+            object.packedContents = GU_ConstDetailHandle(assemblyHandle);
+        }
+    }
+    object.packedContentsMade = true;
+    return object.packedContents;
+}
+
+
 SOP_Read3mf::ErrorCode
 SOP_Read3mf::parseModel(std::string the_model) {
 
@@ -2996,81 +3092,98 @@ SOP_Read3mf::parseModel(std::string the_model) {
         std::cerr << "Warning: " << oldSaveWarningText(this->importedApplication) << std::endl;
     }
 
-    // Without build instructions, place every object that no other object uses as a component, once, as it is in
-    // its file. An object used as a component already comes in as part of each object that uses it, so placing it
-    // on its own too would duplicate its geometry.
-    if (!this->build) {
+    // What to place: the build items, in the order the file lists them, or without build instructions, every
+    // object that no other object uses as a component, once, as it is in its file. An object used as a component
+    // already comes in as part of each object that uses it, so placing it on its own too would duplicate it.
+    std::vector<std::pair<int, UT_Matrix4>> placements;
+    if (this->build) {
+        placements = this->buildItems;
+    } else {
+        std::vector<int> topIds;
         for (auto const& [objectID, objectData] : objectDict) {
             if (this->componentIds.count(objectID) == 0) {
-                UT_Matrix4 transform;
-                transform.identity();
-                buildDict[objectID].push_back(transform);
-                LOG_DEBUG(false, "Without build instructions, placing object " << objectID);
+                topIds.push_back(objectID);
             }
+        }
+        std::sort(topIds.begin(), topIds.end());
+        UT_Matrix4 identity;
+        identity.identity();
+        for (int objectID : topIds) {
+            placements.push_back({objectID, identity});
+            LOG_DEBUG(false, "Without build instructions, placing object " << objectID);
         }
     }
 
-    // Process build list and merge into GDP. Each placed object's primitives are noted, so build_object_id can
-    // record which object they were placed as part of.
-    struct PlacedRange { GA_Offset start; GA_Offset end; int objectID; };
+    // Place them. Each placement's primitives are noted, so build_object_id and build_item can record which
+    // object and which placement they belong to. With Read Instances as Packed Primitives, each placement is one packed
+    // primitive sharing the object's geometry; otherwise a full copy of the geometry.
+    struct PlacedRange { GA_Offset start; GA_Offset end; int objectID; int item; };
     std::vector<PlacedRange> placedRanges;
     UT_Matrix4 scale_matrix(this->scale_factor);
     this->gdp->clearAndDestroy();
-    for (auto const& [buildID, transformList] : buildDict) {
+    for (size_t item = 0; item < placements.size(); ++item) {
+        const int buildID = placements[item].first;
         auto ito = objectDict.find(buildID);
         if (ito == objectDict.end() || !ito->second->objGdpHandle.isValid()) {
             std::cerr << "Error: Object ID " << buildID << " has no geometry." << std::endl;
             continue;
         }
-        LOG_DEBUG(this->debug, "Going through buildList we have object " << buildID);
+        LOG_DEBUG(this->debug, "Placing object " << buildID << " as build item " << item);
 
-        const GU_Detail* sourceGdp = ito->second->objGdpHandle.gdp();
-        if (!sourceGdp) {
-            std::cerr << "Error: No geometry detail for an object." << std::endl;
-            return ErrorCode::OTHER;
-        }
-/*
-        for (const UT_Matrix4& mat : transformList) {
-            GA_Index startIdx = this->gdp->getNumPoints();
-            this->gdp->merge(*sourceGdp);
-            GA_Index endIdx = this->gdp->getNumPoints();
+        UT_Matrix4 finalMat(placements[item].second);
+        finalMat *= scale_matrix;
+        GA_Offset startPrimOff = this->gdp->getNumPrimitiveOffsets();
 
-            if (endIdx > startIdx) {
-                UT_Matrix4 finalMat(mat);
-                finalMat *= scale_matrix;
-
-                GA_Range newPoints(this->gdp->getPointMap(), startIdx, endIdx);
-
-                this->gdp->transform(finalMat, GA_Range(), newPoints, false);
+        if (this->packInstances) {
+            std::string packError;
+            GU_ConstDetailHandle contents = this->packedContentsFor(buildID, 0, packError);
+            if (!packError.empty()) {
+                this->readError(packError);
+                return ErrorCode::BAD_3MF;
             }
-        }
-*/
-        for (const UT_Matrix4& mat : transformList) {
+            if (!contents.isValid()) {
+                continue; // nothing to show, e.g. an object with no triangles
+            }
+            GU_PrimPacked *packed = GU_PackedGeometry::packGeometry(*this->gdp, contents);
+            if (!packed) {
+                this->readError("Couldn't make a packed primitive for object " + std::to_string(buildID) + ".");
+                return ErrorCode::OTHER;
+            }
+            setPackedTransform(this->gdp, packed, finalMat);
+            tagPackedPrimitive(this->gdp, packed->getMapOffset(), *ito->second);
+        } else {
+            const GU_Detail* sourceGdp = ito->second->objGdpHandle.gdp();
+            if (!sourceGdp) {
+                std::cerr << "Error: No geometry detail for an object." << std::endl;
+                return ErrorCode::OTHER;
+            }
             GA_Offset startOff = this->gdp->getNumPointOffsets();
-            GA_Offset startPrimOff = this->gdp->getNumPrimitiveOffsets();
             this->gdp->merge(*sourceGdp);
             GA_Offset endOff = this->gdp->getNumPointOffsets();
-            GA_Offset endPrimOff = this->gdp->getNumPrimitiveOffsets();
-            if (endPrimOff > startPrimOff) {
-                placedRanges.push_back({startPrimOff, endPrimOff, buildID});
-            }
             if (endOff > startOff) {
-                UT_Matrix4 finalMat(mat);
-                finalMat *= scale_matrix;
                 GA_Range newPoints(this->gdp->getPointMap(), startOff, endOff);
                 this->gdp->transform(finalMat, GA_Range(), newPoints, false);
             }
+        }
+
+        GA_Offset endPrimOff = this->gdp->getNumPrimitiveOffsets();
+        if (endPrimOff > startPrimOff) {
+            placedRanges.push_back({startPrimOff, endPrimOff, buildID, static_cast<int>(item)});
         }
     }
 
     // build_object_id: the object each primitive was placed as part of -- the object a build item names, or with
     // build instructions off, the top-level object placed. It differs from object_id (the object whose mesh the
     // primitive came from) for an object built from components, such as Bambu Studio's wrapper objects.
+    // build_item: which placement, numbered from 0 in the order of the file's build items (or of the objects
+    // placed without build instructions), so copies of one object can be told apart.
     if (!placedRanges.empty()) {
         GA_RWHandleI buildObjectIdHandle(this->gdp->addIntTuple(GA_ATTRIB_PRIMITIVE, "build_object_id", 1));
+        GA_RWHandleI buildItemHandle(this->gdp->addIntTuple(GA_ATTRIB_PRIMITIVE, "build_item", 1));
         for (const PlacedRange &placed : placedRanges) {
             for (GA_Iterator it(GA_Range(this->gdp->getPrimitiveMap(), placed.start, placed.end)); !it.atEnd(); ++it) {
                 buildObjectIdHandle.set(*it, placed.objectID);
+                buildItemHandle.set(*it, placed.item);
             }
         }
     }
@@ -3083,7 +3196,6 @@ SOP_Read3mf::parseModel(std::string the_model) {
     GA_RWHandleS(this->gdp->addStringTuple(GA_ATTRIB_DETAIL, "in_copyright", 1)).set(GA_Offset(0), this->	importedCopyright);
     GA_RWHandleS(this->gdp->addStringTuple(GA_ATTRIB_DETAIL, "in_modificationdate", 1)).set(GA_Offset(0), 	this->importedModificationDate);
 
-    printMap(buildDict, "buildDict", this->debug);
     printMap(vertexDict, "vertexDict", this->debug);
     printObjectMap(objectDict, "objectDict", this->debug);
 
@@ -4775,7 +4887,7 @@ SOP_Read3mf::handleBuild(XMLElement* element) {
                     return ErrorCode::BAD_3MF;
                 }
             }
-            buildDict[objectID].push_back(transform);
+            this->buildItems.push_back({objectID, transform});
             LOG_DEBUG(false, "Just inserted a transform for objectID " << objectID);
 
             // Currently we ignore the following. Not sure if this is important for Houdini's purposes. XXX
@@ -4947,6 +5059,11 @@ SOP_Read3mf::handleObject(XMLElement* element) {
     if (objectDict.count(id) == 0) {
         ObjectData* data = new ObjectData(); // This is our only "new" of this object. We do the clean-up in clearData().
         data->id = id;
+        const char *objName = element->Attribute("name");
+        data->name = objName ? objName : "";
+        data->modelFile = this->currentModelPart;
+        data->fileObjectId = id;
+        element->QueryIntAttribute("read3mf_fileid", &data->fileObjectId); // set on objects from other model files
         objectDict[id] = data; // Store the ptr not the whole thing in case of resizing of the dictionary
         LOG_DEBUG(this->debug, "Created objectID entry for object " << id);
 
@@ -5293,6 +5410,23 @@ SOP_Read3mf::handleComponent(XMLElement* element, int parentID) {
         return ErrorCode::OTHER;
     }
 
+    // Get component object's transform
+    UT_Matrix4 transform;
+    if (!xform_cstr) {
+        transform.identity();
+    } else if (!parseTransformString(xform_cstr, transform)) {
+        std::cerr << "Error: Could not parse transform string for a component." << std::endl;
+        return ErrorCode::BAD_3MF;
+    }
+
+    // Read Instances as Packed Primitives: remember the component, rather than copying its geometry into the parent. The
+    // parent becomes a packed primitive holding one packed primitive per component (see packedContentsFor()).
+    if (this->packInstances) {
+        itp->second->components.push_back({id, transform});
+        LOG_DEBUG(false, "Recorded component " << id << " of object " << parentID);
+        return ErrorCode::SUCCESS;
+    }
+
     // Use the .gdp() method from the header for read-only access
     const GU_Detail* sourceGdp = it->second->objGdpHandle.gdp();
     // Ensure this handle is the only one pointing to this geometry
@@ -5325,19 +5459,6 @@ SOP_Read3mf::handleComponent(XMLElement* element, int parentID) {
     // Create the range using the offsets
     GA_Range new_points(parentGdp->getPointMap(), start_pt_off, end_pt_off);
 
-
-    // Get component object's transform
-    UT_Matrix4 transform;
-    if (!xform_cstr) {
-        transform.identity();
-    } else {
-        bool success;
-        success = parseTransformString(xform_cstr, transform);
-        if (!success) {
-            std::cerr << "Error: Could not parse transform string for build item." << std::endl;
-            return ErrorCode::BAD_3MF;
-        }
-    }
 
     // Transform the points
     parentGdp->transform(
